@@ -1,3 +1,4 @@
+# Kernel build artifacts (any directory)
 modules.order
 *.o
 *.ko
@@ -12,3 +13,11 @@ modules.order
 *.o.ur-safe
 .tmp_versions/
 dkms.conf
+
+# Userspace build
+build/
+target/
+
+# Reference archives — not shipped; fetch locally (see reference/README.md)
+reference/linux-2019/
+reference/windows-lenovo/
