@@ -426,13 +426,17 @@ protocol or addressing.
 
 **Priority order:**
 
-1. **Packaging / boot** — `modprobe.d`, udev softdep, optional autoload on
+1. **Coordinator input scenario** — Linux cannot leave keyboard scenario (`1`);
+   phantom typing persists. Capture Windows USB transition (keyboard →
+   pen-mouse) per [WINDOWS_CAPTURE.md](WINDOWS_CAPTURE.md), replay in
+   `ite8951_usb.c`.
+2. **Packaging / boot** — `modprobe.d`, udev softdep, optional autoload on
    `048d:8951`; stable connector naming in DRM.
-2. **Refresh policy** — shadow FB, dirty rects, waveform selection, ghosting
+3. **Refresh policy** — shadow FB, dirty rects, waveform selection, ghosting
    cleanse; cap niri commit rate.
-3. **`einkd` skeleton** — D-Bus mode API; coordinate keyboard exit with DRM;
+4. **`einkd` skeleton** — D-Bus mode API; coordinate keyboard exit with DRM;
    sleep/resume re-init from `SvrMsg.h` message IDs.
-4. **Suspend/resume** — full USB reconnect + panel re-init sequence.
+5. **Suspend/resume** — full USB reconnect + panel re-init sequence.
 
 **Do not:**
 
@@ -455,7 +459,8 @@ protocol or addressing.
 ├── docs/
 │   ├── BLUEPRINT.md          ← roadmap + bring-up log (this file)
 │   ├── ARCHITECTURE.md
-│   └── CODING_STYLE.md
+│   ├── CODING_STYLE.md
+│   └── WINDOWS_CAPTURE.md    ← dual-boot USB RE checklist
 ├── kernel/
 │   └── eink_drm/             ← active driver (USB + DRM)
 ├── userspace/                ← einkd (Phase 3, not started)

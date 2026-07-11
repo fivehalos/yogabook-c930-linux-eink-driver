@@ -27,6 +27,7 @@ Implementation policy: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | [**Coding style**](docs/CODING_STYLE.md) | C throughout — kernel + userspace readability standards |
 | [**Architecture & policy**](docs/ARCHITECTURE.md) | Layers, reference-only rule, retired patterns |
 | [**Blueprint & roadmap**](docs/BLUEPRINT.md) | Progress log, lessons learned, **agent handoff** |
+| [**Windows USB capture**](docs/WINDOWS_CAPTURE.md) | Dual-boot RE session — coordinator scenario traces |
 | [Reference fetch guide](reference/README.md) | Download archives for hardware documentation |
 
 ## Hardware
