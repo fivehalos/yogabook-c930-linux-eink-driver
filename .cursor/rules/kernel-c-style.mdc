@@ -1,0 +1,38 @@
+---
+description: Kernel C style — readable, Linux-standard, beginner-friendly
+globs: kernel/**/*.{c,h}
+alwaysApply: false
+---
+
+# Kernel C (eink_drm)
+
+Full guide: `docs/CODING_STYLE.md` · Architecture: `docs/ARCHITECTURE.md`
+
+## Must follow
+
+- Linux kernel coding style + SPDX `GPL-2.0-only` headers
+- **Clean-room only** — never copy from `reference/linux-2019/` or Windows trees
+- Names teach intent: `ite8951_wait_display_ready`, not `await_OK` / `send_ctrl`
+- Wrap opcodes/registers in named constants and small functions
+- Comments only for non-obvious protocol, hardware layout, or trade-offs — not narrating `i++`
+- Structure: logical blocks separated by blank lines; early `return` on errors; `goto` cleanup OK
+- `dev_dbg` / `dev_err` with context (what, where, ret)
+- kernel-doc on exported structs/functions
+
+## Avoid
+
+- Mega-functions, cryptic abbreviations, obvious comments
+- `/dev/eink0` text protocol in production code
+- Includes or logic from `reference/` paths
+
+## Example
+
+```c
+/* Good */
+ret = ite8951_set_waveform(usb, EINK_WAVEFORM_GL16);
+if (ret)
+	return ret;
+
+/* Bad */
+ret = ite8951_usb_xfer(usb, 0xA9, 0x01010000, ...); /* set waveform */
+```

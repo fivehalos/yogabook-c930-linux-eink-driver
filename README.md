@@ -14,14 +14,20 @@ module into a **first-class Linux display stack**:
 - **Keyboard emulator** — custom layouts via touch + uinput (post-boot)
 
 Reference material (2019 Linux driver, Lenovo Windows source) is **not shipped
-in this repo**. Fetch locally when needed — see [reference/README.md](reference/README.md).
+in this repo** and **not ported into production code** — it exists only to
+document hardware calls. Fetch locally when needed — see
+[reference/README.md](reference/README.md).
+
+Implementation policy: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick links
 
 | Document | Description |
 |----------|-------------|
-| [**Blueprint & roadmap**](docs/BLUEPRINT.md) | Architecture, conclusions, phased plan |
-| [Reference fetch guide](reference/README.md) | How to download archives locally |
+| [**Coding style**](docs/CODING_STYLE.md) | C throughout — kernel + userspace readability standards |
+| [**Architecture & policy**](docs/ARCHITECTURE.md) | Layers, reference-only rule, retired patterns |
+| [**Blueprint & roadmap**](docs/BLUEPRINT.md) | Progress log, lessons learned, **agent handoff** |
+| [Reference fetch guide](reference/README.md) | Download archives for hardware documentation |
 
 ## Hardware
 
@@ -36,20 +42,25 @@ on stock Linux. This project targets the **E-Ink panel only**.
 ## Repository layout
 
 ```
-docs/BLUEPRINT.md     ← start here
+docs/
+  ARCHITECTURE.md   ← implementation policy & layers
+  BLUEPRINT.md      ← roadmap
+  CODING_STYLE.md   ← kernel C readability standards
 kernel/               ← DRM driver (in development)
 userspace/            ← einkd, terminal, plugins (planned)
-reference/            ← gitignored archives; see reference/README.md
-scripts/fetch-references.sh
+reference/            ← gitignored archives; hardware docs only
+scripts/
 ```
 
-## Trying the 2019 driver (experimental)
+## Reference driver (bring-up only)
 
-Fetch the 2019 driver first: `./scripts/fetch-references.sh --linux`
+The 2019 community module in `reference/linux-2019/` is **not production code**.
+It can be loaded for hardware smoke tests (`scripts/test-board.sh`) until
+`eink_drm` has its own test path.
 
-Then see `reference/linux-2019/README.md`.
+Fetch: `./scripts/fetch-references.sh --linux`
 
-**Warning:** immature, sleep issues, use at your own risk.
+**Warning:** reference driver is immature; sleep issues; use at your own risk.
 
 ## Contributing
 

@@ -17,7 +17,13 @@ dkms.conf
 # Userspace build
 build/
 target/
+userspace/eink-touchpad/eink-touchpad
+userspace/eink-touchpad/*.o
+
+# Hardware test logs (scripts/test-eink-drm.sh)
+logs/
 
 # Reference archives — not shipped; fetch locally (see reference/README.md)
 reference/linux-2019/
 reference/windows-lenovo/
+reference/yoga.book.2.e-reader_v1.0.0.5/

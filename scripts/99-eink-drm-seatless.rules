@@ -1,0 +1,11 @@
+# Lenovo YogaBook C930 E-Ink — keep the DRM card off the session seat.
+#
+# Without this, niri/logind open /dev/dri/cardN on hotplug and hold DRM master,
+# so modetest cannot modeset (Permission denied even as root).
+#
+# Install:
+#   sudo cp scripts/99-eink-drm-seatless.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo rmmod eink_drm && sudo insmod kernel/eink_drm/eink_drm.ko drm_enable=1
+
+SUBSYSTEM=="drm", KERNEL=="card*", DRIVERS=="eink_drm", TAG+="seat-less"

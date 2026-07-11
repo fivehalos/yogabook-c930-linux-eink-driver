@@ -1,0 +1,13 @@
+---
+description: Project-wide — production code is C only
+alwaysApply: true
+---
+
+# YogaBook E-Ink — C throughout
+
+- **Kernel** (`kernel/`): C, Linux driver style — see `docs/CODING_STYLE.md`
+- **Userspace** (`userspace/`): C11, plain POSIX/systemd — no C++, no Rust
+- **Reference** (`reference/`): read-only hardware docs — never copy into production
+- Architecture: `docs/ARCHITECTURE.md`
+
+File-specific rules apply for `kernel/**/*.c` and `userspace/**/*.c`.

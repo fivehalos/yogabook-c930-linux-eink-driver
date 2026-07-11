@@ -12,16 +12,19 @@
 
 ## Starting points
 
-- Protocol implementation: `reference/linux-2019/driver/eink.c` (fetch via `scripts/fetch-references.sh`)
-- Opcode / struct definitions: `reference/windows-lenovo/.../inc/tconcmd.h`
-- Linux DRM examples: `drivers/gpu/drm/`, simple USB display: `udl` driver
+- **Hardware knowledge:** `reference/` archives (gitignored) — opcode tables,
+  USB notes, HID formats. Read only; do not port into production code.
+- **Linux APIs:** `drivers/gpu/drm/` examples, simple USB display: `udl` driver
+- **Policy:** [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)
 
 ## Not in scope
 
 - HID touch/keyboard (userspace `einkd`)
 - Mode orchestration (userspace)
-- `/dev/eink0` text protocol (retire for production; optional debug interface)
+- `/dev/eink0` text protocol (reference driver only; not production)
 
 ## Status
 
-Not yet started. See [docs/BLUEPRINT.md](../docs/BLUEPRINT.md) Phase 1.
+Phase 1 in progress — USB probe + ITE8951 doorknock **validated on C930 hardware**
+(2026-07-11). Next: DRM connector + first pixel. See
+[docs/BLUEPRINT.md](../docs/BLUEPRINT.md) (agent handoff).

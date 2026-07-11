@@ -1,0 +1,27 @@
+---
+description: Userspace C style — plain C, readable, POSIX/Linux APIs
+globs: userspace/**/*.{c,h}
+alwaysApply: false
+---
+
+# Userspace C (einkd, tools)
+
+Full guide: `docs/CODING_STYLE.md` · Architecture: `docs/ARCHITECTURE.md`
+
+## Must follow
+
+- **C throughout** — C11, no C++, no Rust in `userspace/`
+- Same readability bar as kernel: names teach, short files/functions, sparse comments
+- Plain C + POSIX/systemd: `sd-bus`, `hidraw`/`libevdev`, `syslog`/`sd_journal`
+- Pixels via DRM only — no USB panel protocol in userspace
+- SPDX headers; `-Wall -Wextra`; check all `malloc`/syscall returns
+- Log failures with context: path, errno, mode name
+
+## File layout (einkd)
+
+Split by job: `main.c`, `dbus_api.c`, `hid_touch.c`, `mode_*.c` — not one mega `main.c`.
+
+## Avoid
+
+- GObject/C++ unless explicitly decided later (default: plain C)
+- Cryptic names, obvious comments, duplicating kernel protocol code
