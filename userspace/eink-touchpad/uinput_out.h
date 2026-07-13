@@ -7,7 +7,8 @@
 #include <stdbool.h>
 
 struct eink_uinput {
-	int fd;
+	int fd;		/* virtual pointer (REL mouse) */
+	int kbd_fd;	/* virtual keyboard (gesture keys) */
 	bool btn_left_down;
 };
 
@@ -18,5 +19,6 @@ int uinput_emit_rel(struct eink_uinput *out, int dx, int dy);
 int uinput_emit_btn(struct eink_uinput *out, unsigned int btn, int value);
 int uinput_emit_key(struct eink_uinput *out, unsigned int key, int value);
 int uinput_emit_key_combo(struct eink_uinput *out, unsigned int key);
+int uinput_selftest_pointer(struct eink_uinput *out);
 
 #endif /* EINK_UINPUT_OUT_H */

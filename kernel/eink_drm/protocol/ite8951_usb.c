@@ -726,10 +726,10 @@ module_param(reassert_draw_scenario, bool, 0644);
 MODULE_PARM_DESC(reassert_draw_scenario,
 		 "Re-send leave-KB if GET still reports keyboard around each frame");
 
-static bool reassert_draw_input = true;
+static bool reassert_draw_input;
 module_param(reassert_draw_input, bool, 0644);
 MODULE_PARM_DESC(reassert_draw_input,
-		 "Re-send 0xAC/0xB3/0xAF input routing around each compositor frame");
+		 "Re-send 0xAC/0xB3/0xAF every frame (can stop HID 0x90 — leave off)");
 
 static int ite8951_set_handwriting_region(struct ite8951_usb *link,
 					  u16 x, u16 y, u16 w, u16 h)
@@ -879,32 +879,11 @@ static int ite8951_detach_keyboard_input(struct ite8951_usb *link)
 		return ret;
 	}
 
-	/* Windows: EiSetTpArea flag=0 then TOUCH_PEN on full panel (1920×1080). */
-	ret = ite8951_set_tp_area(link, 0, 0, EINK_PANEL_WIDTH, EINK_PANEL_HEIGHT,
-				  0, ITE8951_TP_AREA_NO_REPORT);
-	if (ret) {
-		dev_warn(&link->usb_dev->dev,
-			 "tp area priming (panel) failed: %d\n", ret);
-		return ret;
-	}
-
-	ret = ite8951_set_tp_area(link, 0, 0, EINK_PANEL_WIDTH, EINK_PANEL_HEIGHT,
-				  0, ITE8951_TP_AREA_TOUCH_PEN);
-	if (ret) {
-		dev_warn(&link->usb_dev->dev,
-			 "tp area touch+pen (panel) failed: %d\n", ret);
-		return ret;
-	}
-
-	ret = ite8951_set_tp_area(link, 0, 0,
-				  EINK_TOUCH_NATIVE_WIDTH, EINK_TOUCH_NATIVE_HEIGHT,
-				  0, ITE8951_TP_AREA_NO_REPORT);
-	if (ret) {
-		dev_warn(&link->usb_dev->dev,
-			 "tp area priming (native) failed: %d\n", ret);
-		return ret;
-	}
-
+	/*
+	 * Enable digitizer HID (0x90) over the full native touch range.
+	 * Do not also program 1920×1080 slots here — mixed spaces left the
+	 * panel with no reporting after repeated reassert.
+	 */
 	ret = ite8951_set_tp_area(link, 0, 0,
 				  EINK_TOUCH_NATIVE_WIDTH, EINK_TOUCH_NATIVE_HEIGHT,
 				  0, ITE8951_TP_AREA_TOUCH_PEN);
@@ -914,8 +893,9 @@ static int ite8951_detach_keyboard_input(struct ite8951_usb *link)
 		return ret;
 	}
 
-	dev_dbg(&link->usb_dev->dev,
-		"touch routing configured (tp slots, custom HID)\n");
+	dev_info(&link->usb_dev->dev,
+		 "touch routing: native TP %ux%u flag=TOUCH_PEN (HID 0x90)\n",
+		 EINK_TOUCH_NATIVE_WIDTH, EINK_TOUCH_NATIVE_HEIGHT);
 
 	return 0;
 }

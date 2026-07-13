@@ -18,6 +18,7 @@ dkms.conf
 build/
 target/
 userspace/eink-touchpad/eink-touchpad
+userspace/eink-touchpad/uinput-smoke
 userspace/eink-touchpad/*.o
 
 # Hardware test logs (scripts/test-eink-drm.sh)

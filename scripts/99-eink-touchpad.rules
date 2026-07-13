@@ -1,0 +1,22 @@
+# YogaBook E-Ink virtual pointer / gesture keyboard (uinput)
+#
+# Ensure logind/seatd grants the graphical seat access to these nodes.
+# Install:
+#   sudo cp scripts/99-eink-touchpad.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+
+ACTION=="remove", GOTO="eink_touchpad_end"
+
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="YogaBook E-Ink Pointer", \
+  ENV{ID_INPUT}="1", ENV{ID_INPUT_MOUSE}="1", ENV{ID_INPUT_POINTINGSTICK}="1", \
+  TAG+="uaccess", TAG+="seat"
+
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="YogaBook E-Ink Gestures", \
+  ENV{ID_INPUT}="1", ENV{ID_INPUT_KEYBOARD}="1", \
+  TAG+="uaccess", TAG+="seat"
+
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="YogaBook uinput smoke", \
+  ENV{ID_INPUT}="1", ENV{ID_INPUT_MOUSE}="1", \
+  TAG+="uaccess", TAG+="seat"
+
+LABEL="eink_touchpad_end"

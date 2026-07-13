@@ -6,18 +6,21 @@ CC      ?= gcc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -g
 CPPFLAGS += -I. -I../common
 
-SRCS := main.c hid_touch.c touch_parse.c touch_coord.c uinput_out.c gestures.c
+SRCS := main.c hid_touch.c touch_parse.c touch_coord.c uinput_out.c gestures.c evdev_grab.c
 OBJS := $(SRCS:.c=.o)
 
 .PHONY: all clean
 
-all: eink-touchpad
+all: eink-touchpad uinput-smoke
 
 eink-touchpad: $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS)
+
+uinput-smoke: uinput-smoke.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $<
 
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f eink-touchpad $(OBJS)
+	rm -f eink-touchpad uinput-smoke $(OBJS)
