@@ -689,7 +689,7 @@ struct ite8951_dynamic_setting {
 static bool touch_userspace_config = true;
 module_param(touch_userspace_config, bool, 0644);
 MODULE_PARM_DESC(touch_userspace_config,
-		 "Route touch to custom HID after draw (0xAC/0xB3/0xAF); does not disable boot keyboard HID — use coordinator scenario 0 for that");
+		 "Route touch to custom HID after draw (0xAC/0xB3/0xAF); boot keyboard HID needs 0xA6 leave-KB (scenario<<24)");
 
 static bool reference_draw_mode;
 module_param(reference_draw_mode, bool, 0644);
@@ -699,7 +699,7 @@ MODULE_PARM_DESC(reference_draw_mode,
 static u8 input_scenario = ITE8951_SCENARIO_PEN_MOUSE;
 module_param(input_scenario, byte, 0644);
 MODULE_PARM_DESC(input_scenario,
-		 "Coordinator input scenario after draw entry (0=owner-draw, 1=keyboard, 3=pen-mouse)");
+		 "Input mode after draw (0=owner-draw, 1=keyboard, 3=pen-mouse leave-KB via addr<<24)");
 
 static bool keyboard_exit_before_draw;
 module_param(keyboard_exit_before_draw, bool, 0644);
@@ -719,12 +719,12 @@ MODULE_PARM_DESC(draw_scenario_preamble,
 static bool scenario_verify_strict;
 module_param(scenario_verify_strict, bool, 0644);
 MODULE_PARM_DESC(scenario_verify_strict,
-		 "Fail draw entry when firmware scenario does not match input_scenario");
+		 "Fail draw entry if still in firmware keyboard after leave-KB (GET byte1==1)");
 
 static bool reassert_draw_scenario = true;
 module_param(reassert_draw_scenario, bool, 0644);
 MODULE_PARM_DESC(reassert_draw_scenario,
-		 "Re-send input_scenario around each compositor frame");
+		 "Re-send leave-KB if GET still reports keyboard around each frame");
 
 static bool reassert_draw_input = true;
 module_param(reassert_draw_input, bool, 0644);
@@ -963,6 +963,27 @@ static int ite8951_get_tcon_scenario(struct ite8951_usb *link, u8 *scenario)
 	return ite8951_scenario_cmd(link, 0, 0, scenario);
 }
 
+/*
+ * After leave-KB (address 0x03000000), firmware GET reports 0, not 3.
+ * Non-keyboard requests succeed when GET is no longer keyboard.
+ */
+static bool ite8951_scenario_satisfied(u8 want, u8 reported)
+{
+	if (want == ITE8951_SCENARIO_KEYBOARD)
+		return reported == ITE8951_SCENARIO_KEYBOARD;
+
+	return reported != ITE8951_SCENARIO_KEYBOARD;
+}
+
+/* SET address for leave-KB / mode change (want==0 cannot use <<24 — that is GET). */
+static u32 ite8951_scenario_set_address(u8 want)
+{
+	if (want == ITE8951_SCENARIO_NORMAL)
+		return ITE8951_SCENARIO_LEAVE_KB_ADDR;
+
+	return ITE8951_SCENARIO_ADDR(want);
+}
+
 /* 2019 reference firmware opcodes in the address field (not coordinator bytes). */
 static int ite8951_firmware_scenario_opcode(struct ite8951_usb *link, u32 opcode)
 {
@@ -992,45 +1013,79 @@ static int ite8951_log_tcon_scenario(struct ite8951_usb *link, const char *when)
 	return reported;
 }
 
-/* Try every known 0xA6 scenario encoding; return 0 if GET matches want. */
+/*
+ * Windows CDB-inline 0xB3 (no OUT payload) from C-penmouse.pcap — optional
+ * before leave-KB; may fail harmlessly.
+ */
+static int ite8951_dynamic_cdb_pen_mouse(struct ite8951_usb *link)
+{
+	struct ite8951_ctrl_packet packet;
+
+	ite8951_build_ctrl_packet(&packet, false, 0,
+				  ITE8951_USB_OP_DYNAMICSETTING, 0,
+				  0x0100, 0x0103, 0x0301, 0);
+
+	return ite8951_exchange(link, &packet, NULL, 0);
+}
+
+/* Prefer address = scenario << 24; return 0 if GET left firmware keyboard. */
 static int ite8951_try_set_coordinator_scenario(struct ite8951_usb *link, u8 want)
 {
 	u8 reported = 0xff;
+	u32 set_addr;
 	int ret;
 
+	set_addr = ite8951_scenario_set_address(want);
+
 	/*
-	 * Encoding A — EiSetScenario: DWORD scenario in address (service MsgBuf).
-	 * Pen-mouse = address 3, keyboard = address 1, owner-draw = address 0.
+	 * Encoding A — Windows-validated: scenario in address high byte.
+	 * Pen-mouse leave-KB = 0x03000000; GET then reports 0 (not 3).
 	 */
-	ret = ite8951_scenario_cmd(link, want, 0, NULL);
+	ret = ite8951_scenario_cmd(link, set_addr, 0, NULL);
 	if (ret)
 		return ret;
 	ret = ite8951_get_tcon_scenario(link, &reported);
-	if (!ret && reported == want) {
+	if (!ret && ite8951_scenario_satisfied(want, reported)) {
 		dev_info(&link->usb_dev->dev,
-			 "scenario %u latched via address DWORD encoding\n", want);
+			 "scenario want=%u latched via addr=0x%08x (GET=%u)\n",
+			 want, set_addr, reported);
 		return 0;
 	}
 	dev_dbg(&link->usb_dev->dev,
-		"address=%u left scenario %u, trying arg1 encoding\n",
-		want, reported);
+		"addr=0x%08x left GET=%u (want=%u), trying fallbacks\n",
+		set_addr, reported, want);
 
-	/* Encoding B — TconSetScenario: BYTE in arg1 (non-zero; arg1=0 is GET). */
+	/* Encoding B — legacy low DWORD (pre-Windows capture guess). */
+	if (want != ITE8951_SCENARIO_NORMAL || set_addr != want) {
+		ret = ite8951_scenario_cmd(link, want, 0, NULL);
+		if (ret)
+			return ret;
+		ret = ite8951_get_tcon_scenario(link, &reported);
+		if (!ret && ite8951_scenario_satisfied(want, reported)) {
+			dev_info(&link->usb_dev->dev,
+				 "scenario want=%u latched via low DWORD (GET=%u)\n",
+				 want, reported);
+			return 0;
+		}
+	}
+
+	/* Encoding C — TconSetScenario-style BYTE in arg1. */
 	if (want != ITE8951_SCENARIO_NORMAL) {
 		ret = ite8951_scenario_cmd(link, 0, want, NULL);
 		if (ret)
 			return ret;
 		ret = ite8951_get_tcon_scenario(link, &reported);
-		if (!ret && reported == want) {
+		if (!ret && ite8951_scenario_satisfied(want, reported)) {
 			dev_info(&link->usb_dev->dev,
-				 "scenario %u latched via arg1 encoding\n", want);
+				 "scenario want=%u latched via arg1 (GET=%u)\n",
+				 want, reported);
 			return 0;
 		}
 		dev_dbg(&link->usb_dev->dev,
-			"arg1=%u left scenario %u\n", want, reported);
+			"arg1=%u left GET=%u\n", want, reported);
 	}
 
-	/* Encoding C — 2019 firmware opcodes (owner-draw only). */
+	/* Encoding D — 2019 firmware opcodes (owner-draw path). */
 	if (want == ITE8951_SCENARIO_NORMAL) {
 		if (draw_scenario_preamble) {
 			ret = ite8951_firmware_scenario_opcode(link,
@@ -1043,14 +1098,15 @@ static int ite8951_try_set_coordinator_scenario(struct ite8951_usb *link, u8 wan
 		if (ret)
 			return ret;
 		ret = ite8951_get_tcon_scenario(link, &reported);
-		if (!ret && reported == want) {
+		if (!ret && ite8951_scenario_satisfied(want, reported)) {
 			dev_info(&link->usb_dev->dev,
-				 "scenario 0 latched via 2019 opcode pair\n");
+				 "scenario 0 latched via 2019 opcode pair (GET=%u)\n",
+				 reported);
 			return 0;
 		}
 	}
 
-	return reported == want ? 0 : -EAGAIN;
+	return ite8951_scenario_satisfied(want, reported) ? 0 : -EAGAIN;
 }
 
 static int ite8951_set_coordinator_scenario(struct ite8951_usb *link, u8 scenario)
@@ -1062,8 +1118,8 @@ static int ite8951_set_coordinator_scenario(struct ite8951_usb *link, u8 scenari
 }
 
 /*
- * Leave firmware keyboard for compositor + touchpad input. GET (addr=0 arg1=0)
- * returns the live scenario in response byte 1.
+ * Leave firmware keyboard for compositor + touchpad. GET (addr=0) returns the
+ * live scenario in response byte 1; after leave-KB that is typically 0.
  */
 static int ite8951_request_input_scenario(struct ite8951_usb *link)
 {
@@ -1071,13 +1127,21 @@ static int ite8951_request_input_scenario(struct ite8951_usb *link)
 	u8 want = input_scenario;
 	int ret;
 
+	if (want != ITE8951_SCENARIO_KEYBOARD) {
+		ret = ite8951_dynamic_cdb_pen_mouse(link);
+		if (ret)
+			dev_warn(&link->usb_dev->dev,
+				 "input transition: 0xB3 CDB failed: %d\n", ret);
+	}
+
 	ret = ite8951_set_waveform_u16(link, 0x200);
 	if (ret)
 		dev_warn(&link->usb_dev->dev,
 			 "input transition: waveform 0x200 failed: %d\n", ret);
 
 	dev_info(&link->usb_dev->dev,
-		 "requesting coordinator input scenario %u\n", want);
+		 "requesting coordinator input scenario %u (SET addr=0x%08x)\n",
+		 want, ite8951_scenario_set_address(want));
 
 	ret = ite8951_set_coordinator_scenario(link, want);
 	if (ret)
@@ -1087,17 +1151,20 @@ static int ite8951_request_input_scenario(struct ite8951_usb *link)
 	if (reported < 0)
 		return reported;
 
-	if (reported == want)
+	if (ite8951_scenario_satisfied(want, reported)) {
+		if (want != ITE8951_SCENARIO_KEYBOARD &&
+		    reported != want)
+			dev_info(&link->usb_dev->dev,
+				 "left firmware keyboard (GET=%u, requested %u)\n",
+				 reported, want);
 		return 0;
-
-	/* Encoding attempts already ran inside set_coordinator_scenario. */
-	if (reported != want) {
-		dev_warn(&link->usb_dev->dev,
-			 "firmware reports scenario %u, wanted %u — continuing with display_cfg + touch routing\n",
-			 reported, want);
-		if (scenario_verify_strict)
-			return -EIO;
 	}
+
+	dev_warn(&link->usb_dev->dev,
+		 "firmware still reports keyboard scenario %u (wanted %u) — continuing with display_cfg + touch routing\n",
+		 reported, want);
+	if (scenario_verify_strict)
+		return -EIO;
 
 	return 0;
 }
@@ -1266,9 +1333,10 @@ static int ite8951_enter_draw_mode_coordinator(struct ite8951_usb *link)
 		return ret;
 
 	reported = ite8951_log_tcon_scenario(link, "after display_cfg");
-	if (reported >= 0 && reported != input_scenario) {
+	if (reported >= 0 &&
+	    !ite8951_scenario_satisfied(input_scenario, reported)) {
 		dev_warn(&link->usb_dev->dev,
-			 "scenario %u after display_cfg, retrying set to %u\n",
+			 "still keyboard (GET=%u) after display_cfg, retrying leave-KB (want=%u)\n",
 			 reported, input_scenario);
 		ite8951_try_set_coordinator_scenario(link, input_scenario);
 		ite8951_log_tcon_scenario(link, "after post-display retry");
@@ -1329,9 +1397,9 @@ int ite8951_assert_draw_scenario(struct ite8951_usb *link)
 	if (ret)
 		return ret;
 
-	if (reported != input_scenario) {
+	if (!ite8951_scenario_satisfied(input_scenario, reported)) {
 		dev_dbg(&link->usb_dev->dev,
-			"firmware scenario %u, want %u — reasserting\n",
+			"firmware still keyboard (GET=%u), reasserting leave-KB want=%u\n",
 			reported, input_scenario);
 		ret = ite8951_set_coordinator_scenario(link, input_scenario);
 		if (ret)

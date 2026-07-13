@@ -101,4 +101,5 @@ leave-KB.
 - Exact `0xB3` / `0xAF` field map vs Lenovo structs
 - Whether Linux must also send B3/AF after `0x03000000`, or A6 alone is enough
 - Port: use `(u32)scenario << 24` in `ite8951_try_set_coordinator_scenario()`;
-  treat GET=`0` after requesting pen-mouse as success
+  treat GET=`0` after requesting pen-mouse as success — **done in kernel**
+  (`ITE8951_SCENARIO_ADDR` / `ite8951_scenario_satisfied`).

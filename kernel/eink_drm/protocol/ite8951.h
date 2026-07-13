@@ -41,12 +41,17 @@ struct usb_device;
 #define ITE8951_PANEL_READY_POLL_MS	50
 
 /*
- * Coordinator scenario IDs (itetcon.h TconSetScenario / EinkIteAPI GiSetHandWritingMode).
- * Windows sends these as DWORDs on USB 0xA6 — not the 2019 reference DWORD transitions.
+ * Coordinator scenario IDs (itetcon.h / EinkIteAPI).
+ * USB 0xA6 SET puts the ID in the address high byte: address = scenario << 24
+ * (validated on Windows — see docs/PROTOCOL_WINDOWS.md). GET (address=0) returns
+ * live scenario in response byte 1. After leave-KB (0x03000000), GET reports 0,
+ * not 3 — success is "not keyboard", not "GET == requested ID".
  */
 #define ITE8951_SCENARIO_NORMAL		0u	/* TCON_SCENARIO_NORMAL, GIHW_OWNER_DRAW */
 #define ITE8951_SCENARIO_KEYBOARD	1u	/* TCON_SCENARIO_KBD, GI_SCENARIO_KEYBOARD */
-#define ITE8951_SCENARIO_PEN_MOUSE	3u	/* TCON_SCENARIO_WACOM_PASS_THROUGH, GI_SCENARIO_PEN_MOUSE */
+#define ITE8951_SCENARIO_PEN_MOUSE	3u	/* GI_SCENARIO_PEN_MOUSE */
+#define ITE8951_SCENARIO_ADDR(s)	((u32)(s) << 24)
+#define ITE8951_SCENARIO_LEAVE_KB_ADDR	ITE8951_SCENARIO_ADDR(ITE8951_SCENARIO_PEN_MOUSE)
 
 /* 2019 reference internal transition DWORDs (usercmd_enable_kb / enable_draw). */
 #define ITE8951_SCENARIO_REF_KB_EXIT	0x00040000u

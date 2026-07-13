@@ -426,9 +426,10 @@ protocol or addressing.
 
 **Priority order:**
 
-1. **Coordinator input scenario** — Windows leave-KB is proven
-   ([PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md)): `0xA6` address `0x03000000`,
-   GET→`0`. Port that encoding into `ite8951_usb.c` (do not require GET=`3`).
+1. **Verify leave-KB on hardware** — kernel now uses `scenario << 24`
+   (`0x03000000`) and treats GET≠`1` as success
+   ([PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md)). Reload `eink_drm`, confirm
+   phantom typing stops, then `eink-touchpad`.
 2. **Packaging / boot** — `modprobe.d`, udev softdep, optional autoload on
    `048d:8951`; stable connector naming in DRM.
 3. **Refresh policy** — shadow FB, dirty rects, waveform selection, ghosting
