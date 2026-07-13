@@ -148,6 +148,32 @@ static void slots_apply_frame(struct eink_gesture_state *st,
 {
 	int i;
 
+	/*
+	 * HID 0x0c carries real contact IDs — map by id, not soft distance
+	 * clustering (0x90 always reports id=1).
+	 */
+	if (frame->kind == EINK_TOUCH_KIND_MT) {
+		slots_expire(st, now);
+		for (i = 0; i < frame->contact_count; i++) {
+			const struct eink_touch_contact *c = &frame->contacts[i];
+			int slot = c->slot;
+
+			if (slot < 0 || slot >= EINK_TOUCH_MAX_CONTACTS)
+				slot = i % EINK_TOUCH_MAX_CONTACTS;
+
+			if (c->mode == EINK_TOUCH_MODE_UP) {
+				st->slots[slot].active = false;
+				continue;
+			}
+
+			st->slots[slot].active = true;
+			st->slots[slot].display_x = c->display_x;
+			st->slots[slot].display_y = c->display_y;
+			st->slots[slot].last_seen = *now;
+		}
+		return;
+	}
+
 	for (i = 0; i < frame->contact_count; i++) {
 		const struct eink_touch_contact *c = &frame->contacts[i];
 

@@ -4,6 +4,8 @@
 
 #include "uinput_out.h"
 
+#include "../common/eink_panel.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -238,11 +240,92 @@ static int create_keyboard(int fd)
 	return 0;
 }
 
+static int set_abs(int fd, unsigned int code, int min, int max, int flat)
+{
+	struct uinput_abs_setup abs;
+
+	if (ioctl(fd, UI_SET_ABSBIT, code) < 0)
+		return -errno;
+
+	memset(&abs, 0, sizeof(abs));
+	abs.code = code;
+	abs.absinfo.minimum = min;
+	abs.absinfo.maximum = max;
+	abs.absinfo.fuzz = 0;
+	abs.absinfo.flat = flat;
+	abs.absinfo.resolution = 0;
+
+	if (ioctl(fd, UI_ABS_SETUP, &abs) < 0)
+		return -errno;
+
+	return 0;
+}
+
+static int create_mt_touchpad(int fd)
+{
+	struct uinput_setup setup;
+	int ret;
+
+	if (ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0)
+		return -errno;
+	if (ioctl(fd, UI_SET_EVBIT, EV_ABS) < 0)
+		return -errno;
+	if (enable_key(fd, BTN_LEFT) < 0)
+		return -errno;
+	if (enable_key(fd, BTN_TOOL_FINGER) < 0)
+		return -errno;
+	if (enable_key(fd, BTN_TOUCH) < 0)
+		return -errno;
+	if (enable_key(fd, BTN_TOOL_DOUBLETAP) < 0)
+		return -errno;
+	if (enable_key(fd, BTN_TOOL_TRIPLETAP) < 0)
+		return -errno;
+
+	if (ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_POINTER) < 0)
+		return -errno;
+	if (ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_BUTTONPAD) < 0)
+		return -errno;
+
+	ret = set_abs(fd, ABS_X, 0, EINK_PANEL_WIDTH - 1, 0);
+	if (ret < 0)
+		return ret;
+	ret = set_abs(fd, ABS_Y, 0, EINK_PANEL_HEIGHT - 1, 0);
+	if (ret < 0)
+		return ret;
+	ret = set_abs(fd, ABS_MT_SLOT, 0, EINK_TOUCH_MAX_CONTACTS - 1, 0);
+	if (ret < 0)
+		return ret;
+	ret = set_abs(fd, ABS_MT_TRACKING_ID, 0, 65535, 0);
+	if (ret < 0)
+		return ret;
+	ret = set_abs(fd, ABS_MT_POSITION_X, 0, EINK_PANEL_WIDTH - 1, 0);
+	if (ret < 0)
+		return ret;
+	ret = set_abs(fd, ABS_MT_POSITION_Y, 0, EINK_PANEL_HEIGHT - 1, 0);
+	if (ret < 0)
+		return ret;
+
+	memset(&setup, 0, sizeof(setup));
+	snprintf(setup.name, sizeof(setup.name), "YogaBook E-Ink Touchpad");
+	setup.id.bustype = BUS_USB;
+	setup.id.vendor = 0x1234;
+	setup.id.product = 0xe103;
+	setup.id.version = 1;
+
+	if (ioctl(fd, UI_DEV_SETUP, &setup) < 0)
+		return -errno;
+	if (ioctl(fd, UI_DEV_CREATE) < 0)
+		return -errno;
+
+	return 0;
+}
+
 int uinput_open(struct eink_uinput *out)
 {
 	int ptr_fd;
 	int kbd_fd;
 	int ret;
+	int i;
 
 	if (!out)
 		return -EINVAL;
@@ -250,6 +333,9 @@ int uinput_open(struct eink_uinput *out)
 	memset(out, 0, sizeof(*out));
 	out->fd = -1;
 	out->kbd_fd = -1;
+	out->mt_fd = -1;
+	for (i = 0; i < EINK_TOUCH_MAX_CONTACTS; i++)
+		out->mt_tracking[i] = -1;
 
 	ptr_fd = open_uinput_fd();
 	if (ptr_fd < 0)
@@ -289,10 +375,54 @@ int uinput_open(struct eink_uinput *out)
 	return 0;
 }
 
+int uinput_open_mt(struct eink_uinput *out)
+{
+	int mt_fd;
+	int ret;
+	int i;
+
+	if (!out)
+		return -EINVAL;
+
+	if (out->mt_fd >= 0)
+		return 0;
+
+	if (out->fd < 0 && out->kbd_fd < 0) {
+		memset(out, 0, sizeof(*out));
+		out->fd = -1;
+		out->kbd_fd = -1;
+		out->mt_fd = -1;
+		for (i = 0; i < EINK_TOUCH_MAX_CONTACTS; i++)
+			out->mt_tracking[i] = -1;
+	}
+
+	mt_fd = open_uinput_fd();
+	if (mt_fd < 0)
+		return mt_fd;
+
+	ret = create_mt_touchpad(mt_fd);
+	if (ret < 0) {
+		close(mt_fd);
+		return ret;
+	}
+
+	usleep(200 * 1000);
+	log_sysname(mt_fd, "touchpad", "YogaBook E-Ink Touchpad");
+	expose_event_node("YogaBook E-Ink Touchpad");
+	out->mt_fd = mt_fd;
+	return 0;
+}
+
 void uinput_close(struct eink_uinput *out)
 {
 	if (!out)
 		return;
+
+	if (out->mt_fd >= 0) {
+		ioctl(out->mt_fd, UI_DEV_DESTROY);
+		close(out->mt_fd);
+		out->mt_fd = -1;
+	}
 
 	if (out->kbd_fd >= 0) {
 		ioctl(out->kbd_fd, UI_DEV_DESTROY);
@@ -305,6 +435,106 @@ void uinput_close(struct eink_uinput *out)
 		close(out->fd);
 		out->fd = -1;
 	}
+}
+
+int uinput_emit_mt_frame(struct eink_uinput *out,
+			 const struct eink_touch_frame *frame)
+{
+	bool seen[EINK_TOUCH_MAX_CONTACTS];
+	int active = 0;
+	int i;
+	int ret;
+	int fd;
+
+	if (!out || !frame || out->mt_fd < 0)
+		return -EINVAL;
+
+	fd = out->mt_fd;
+	memset(seen, 0, sizeof(seen));
+
+	for (i = 0; i < frame->contact_count; i++) {
+		const struct eink_touch_contact *c = &frame->contacts[i];
+		int slot = c->slot;
+		bool down = c->mode != EINK_TOUCH_MODE_UP;
+
+		if (slot < 0 || slot >= EINK_TOUCH_MAX_CONTACTS)
+			slot = i % EINK_TOUCH_MAX_CONTACTS;
+
+		seen[slot] = true;
+
+		ret = write_event(fd, EV_ABS, ABS_MT_SLOT, slot);
+		if (ret < 0)
+			return ret;
+
+		if (down) {
+			if (out->mt_tracking[slot] < 0) {
+				out->mt_tracking[slot] = slot + 1;
+				ret = write_event(fd, EV_ABS, ABS_MT_TRACKING_ID,
+						  out->mt_tracking[slot]);
+				if (ret < 0)
+					return ret;
+			}
+			ret = write_event(fd, EV_ABS, ABS_MT_POSITION_X,
+					  c->display_x);
+			if (ret < 0)
+				return ret;
+			ret = write_event(fd, EV_ABS, ABS_MT_POSITION_Y,
+					  c->display_y);
+			if (ret < 0)
+				return ret;
+			active++;
+		} else if (out->mt_tracking[slot] >= 0) {
+			ret = write_event(fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+			if (ret < 0)
+				return ret;
+			out->mt_tracking[slot] = -1;
+		}
+	}
+
+	/* Clear slots that disappeared without an UP report. */
+	for (i = 0; i < EINK_TOUCH_MAX_CONTACTS; i++) {
+		if (seen[i] || out->mt_tracking[i] < 0)
+			continue;
+		ret = write_event(fd, EV_ABS, ABS_MT_SLOT, i);
+		if (ret < 0)
+			return ret;
+		ret = write_event(fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+		if (ret < 0)
+			return ret;
+		out->mt_tracking[i] = -1;
+	}
+
+	ret = write_event(fd, EV_KEY, BTN_TOUCH, active > 0 ? 1 : 0);
+	if (ret < 0)
+		return ret;
+	ret = write_event(fd, EV_KEY, BTN_TOOL_FINGER, active == 1 ? 1 : 0);
+	if (ret < 0)
+		return ret;
+	ret = write_event(fd, EV_KEY, BTN_TOOL_DOUBLETAP, active == 2 ? 1 : 0);
+	if (ret < 0)
+		return ret;
+	ret = write_event(fd, EV_KEY, BTN_TOOL_TRIPLETAP, active >= 3 ? 1 : 0);
+	if (ret < 0)
+		return ret;
+
+	if (active > 0) {
+		/* Single-touch legacy axes follow first live contact. */
+		for (i = 0; i < frame->contact_count; i++) {
+			const struct eink_touch_contact *c = &frame->contacts[i];
+
+			if (c->mode == EINK_TOUCH_MODE_UP)
+				continue;
+			ret = write_event(fd, EV_ABS, ABS_X, c->display_x);
+			if (ret < 0)
+				return ret;
+			ret = write_event(fd, EV_ABS, ABS_Y, c->display_y);
+			if (ret < 0)
+				return ret;
+			break;
+		}
+	}
+
+	return write_syn(fd);
 }
 
 int uinput_emit_rel(struct eink_uinput *out, int dx, int dy)

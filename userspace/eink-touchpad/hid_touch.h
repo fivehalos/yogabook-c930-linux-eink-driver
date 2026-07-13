@@ -21,6 +21,7 @@ struct eink_hid_candidate {
 	int protocol;
 	int has_touch_report;
 	int has_pen_report;
+	int has_mt_report;
 };
 
 int hid_touch_open(struct eink_hid_touch *hid, const char *path_override,

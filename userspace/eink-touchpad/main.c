@@ -30,8 +30,9 @@ static void usage(const char *prog)
 	fprintf(stderr,
 		"Usage: %s [options]\n"
 		"\n"
-		"Full-screen E-Ink touchpad emulator: read YogaBook touch HID (0x90),\n"
-		"recognise 1/2/3-finger gestures, emit a virtual pointer + keys via uinput.\n"
+		"E-Ink touchpad: HID 0x90 single-contact + soft multi-finger (working).\n"
+		"HID 0x0c real multitouch is not streaming yet after cold GET=3;\n"
+		"use -H /dev/hidrawN when that path is proven live.\n"
 		"\n"
 		"Options:\n"
 		"  -d, --debug         Log touch coords and emitted events\n"
@@ -49,10 +50,7 @@ static void usage(const char *prog)
 		"  -h, --help          Show this help\n"
 		"\n"
 		"Architecture:\n"
-		"  hidraw (touch) -> this daemon -> /dev/uinput -> libinput -> compositor\n"
-		"\n"
-		"Drawing a blank panel is separate: exit firmware keyboard mode and let the\n"
-		"DRM driver / compositor own pixels. This tool only handles input.\n"
+		"  hidraw (0x0c or 0x90) -> this daemon -> /dev/uinput -> libinput\n"
 		"\n"
 		"Requires root (or input group + uinput access) for HID grab and uinput.\n",
 		prog);
@@ -207,8 +205,8 @@ int main(int argc, char **argv)
 
 	gesture_state_init(&gesture, &gcfg);
 	fprintf(stderr,
-		"touchpad mode active — 1 finger move/tap, 2/3 finger "
-		"tap=click swipe=keys\n"
+		"touchpad active — HID 0x90 REL + soft chords "
+		"(0x0c ABS_MT when that iface streams)\n"
 		"  taps: 1=left  2=right  3=middle  "
 		"(rotate=%d warp-max=%d idle=%d release=%d)\n",
 		gcfg.rotate_deg, gcfg.pointer_max_step_px, gcfg.pointer_idle_ms,
@@ -218,6 +216,7 @@ int main(int argc, char **argv)
 		struct eink_touch_frame frame;
 		int n;
 		int i;
+		bool use_mt;
 
 		n = hid_touch_read(&hid, buf, sizeof(buf));
 		evdev_grab_poll();
@@ -235,7 +234,7 @@ int main(int argc, char **argv)
 			if (debug) {
 				int h;
 
-				fprintf(stderr, "hid %d bytes (no 0x90 touch):", n);
+				fprintf(stderr, "hid %d bytes (unparsed):", n);
 				for (h = 0; h < n && h < 32; h++)
 					fprintf(stderr, " %02x", buf[h]);
 				if (n > 32)
@@ -245,23 +244,46 @@ int main(int argc, char **argv)
 			continue;
 		}
 
+		use_mt = frame.kind == EINK_TOUCH_KIND_MT;
+
 		if (debug) {
+			fprintf(stderr, "kind=%s contacts=%d\n",
+				use_mt ? "0x0c-MT" : "0x90",
+				frame.contact_count);
 			for (i = 0; i < frame.contact_count; i++) {
 				const struct eink_touch_contact *c =
 					&frame.contacts[i];
 
 				fprintf(stderr,
-					"touch[%d] mode=%d pos=%d,%d raw=%d,%d mt=%d\n",
+					"  touch[%d] mode=%d pos=%d,%d raw=%d,%d\n",
 					c->slot, c->mode, c->display_x,
-					c->display_y, c->raw_x, c->raw_y,
-					evdev_grab_finger_count());
+					c->display_y, c->raw_x, c->raw_y);
 			}
 		}
 
 		if (!dry_run) {
-			int mt = evdev_grab_finger_count();
-			int gret = gesture_process_frame(&gesture, &frame, &out,
-							 debug, mt);
+			int gret;
+
+			if (use_mt) {
+				if (out.mt_fd < 0) {
+					int mt = uinput_open_mt(&out);
+
+					if (mt < 0) {
+						fprintf(stderr,
+							"ABS_MT uinput open failed: %s\n",
+							strerror(-mt));
+						break;
+					}
+					fprintf(stderr,
+						"MT mode: ABS_MT uinput (libinput gestures)\n");
+				}
+				gret = uinput_emit_mt_frame(&out, &frame);
+			} else {
+				int mt = evdev_grab_finger_count();
+
+				gret = gesture_process_frame(&gesture, &frame,
+							     &out, debug, mt);
+			}
 
 			if (gret < 0)
 				fprintf(stderr, "uinput emit failed: %s\n",

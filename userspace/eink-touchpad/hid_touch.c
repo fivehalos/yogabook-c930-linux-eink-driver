@@ -20,6 +20,7 @@
 
 #define EINK_TOUCH_REPORT_ID	0x90
 #define EINK_PEN_REPORT_ID	0x91
+#define EINK_MT_REPORT_ID	0x0c
 
 static int hid_read_unsigned(const char *path, unsigned int *value)
 {
@@ -132,6 +133,8 @@ static int hid_fill_candidate(const char *hidraw_name,
 		hid_report_has_id(sysfs_dir, EINK_TOUCH_REPORT_ID);
 	candidate->has_pen_report =
 		hid_report_has_id(sysfs_dir, EINK_PEN_REPORT_ID);
+	candidate->has_mt_report =
+		hid_report_has_id(sysfs_dir, EINK_MT_REPORT_ID);
 
 	return 0;
 }
@@ -143,13 +146,21 @@ static int hid_touch_score_candidate(const struct eink_hid_candidate *candidate)
 	if (candidate->protocol == 1)
 		return -1;
 
+	/*
+	 * Prefer live single-contact 0x90. HID 0x0c is present in the descriptor
+	 * after GET=3 but cold Linux still does not stream it (PenMouse arm open).
+	 * Use --hid /dev/hidrawN when 0x0c is proven live.
+	 */
 	if (candidate->has_touch_report)
-		score += 100;
+		score += 200;
+	if (candidate->has_mt_report)
+		score += 50;
 	if (candidate->has_pen_report)
 		score += 10;
 
-	/* Prefer the dedicated touch interface (USB iface 1 / hidraw0). */
-	if (candidate->iface == 1)
+	if (candidate->has_touch_report && candidate->iface == 1)
+		score += 20;
+	else if (candidate->has_mt_report && candidate->iface == 3)
 		score += 5;
 
 	return score;
@@ -225,15 +236,17 @@ int hid_touch_list_candidates(void)
 		any = 1;
 		score = hid_touch_score_candidate(&candidate);
 
-		printf("  %s  iface=%d proto=%d touch0x90=%s pen0x91=%s score=%d%s\n",
+		printf("  %s  iface=%d proto=%d mt0x0c=%s touch0x90=%s pen0x91=%s score=%d%s\n",
 		       candidate.path,
 		       candidate.iface,
 		       candidate.protocol,
+		       candidate.has_mt_report ? "yes" : "no",
 		       candidate.has_touch_report ? "yes" : "no",
 		       candidate.has_pen_report ? "yes" : "no",
 		       score,
 		       score < 0 ? " (skipped)" :
-		       score >= 100 ? " <-- touch" : "");
+		       score >= 200 ? " <-- touch" :
+		       score >= 50 ? " <-- MT (quiet until proven)" : "");
 	}
 
 	closedir(dir);
