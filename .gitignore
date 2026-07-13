@@ -23,6 +23,11 @@ userspace/eink-touchpad/*.o
 # Hardware test logs (scripts/test-eink-drm.sh)
 logs/
 
+# Windows USB RE captures (scripts/windows/Capture-EinkUsb.ps1)
+win-captures/*.pcap
+win-captures/*.pcapng
+win-captures/capture-notes.txt
+
 # Reference archives — not shipped; fetch locally (see reference/README.md)
 reference/linux-2019/
 reference/windows-lenovo/

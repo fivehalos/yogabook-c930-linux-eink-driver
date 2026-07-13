@@ -27,7 +27,8 @@ Implementation policy: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | [**Coding style**](docs/CODING_STYLE.md) | C throughout — kernel + userspace readability standards |
 | [**Architecture & policy**](docs/ARCHITECTURE.md) | Layers, reference-only rule, retired patterns |
 | [**Blueprint & roadmap**](docs/BLUEPRINT.md) | Progress log, lessons learned, **agent handoff** |
-| [**Windows USB capture**](docs/WINDOWS_CAPTURE.md) | Dual-boot RE session — coordinator scenario traces |
+| [**Windows protocol**](docs/PROTOCOL_WINDOWS.md) | Validated leave-KB / `0xA6` wire notes |
+| [**Windows USB capture**](docs/WINDOWS_CAPTURE.md) | Dual-boot RE session — capture checklist |
 | [Reference fetch guide](reference/README.md) | Download archives for hardware documentation |
 
 ## Hardware
@@ -44,12 +45,14 @@ on stock Linux. This project targets the **E-Ink panel only**.
 
 ```
 docs/
-  ARCHITECTURE.md   ← implementation policy & layers
-  BLUEPRINT.md      ← roadmap
-  CODING_STYLE.md   ← kernel C readability standards
-kernel/               ← DRM driver (in development)
-userspace/            ← einkd, terminal, plugins (planned)
-reference/            ← gitignored archives; hardware docs only
+  ARCHITECTURE.md       ← implementation policy & layers
+  BLUEPRINT.md          ← roadmap
+  CODING_STYLE.md       ← kernel C readability standards
+  PROTOCOL_WINDOWS.md   ← validated leave-KB wire notes
+  WINDOWS_CAPTURE.md    ← dual-boot capture checklist
+kernel/                   ← DRM driver (in development)
+userspace/                ← einkd, terminal, plugins (planned)
+reference/                ← gitignored archives; hardware docs only
 scripts/
 ```
 

@@ -23,7 +23,8 @@ addresses, HID report formats, waveform names, and init sequences.
 - Style: [CODING_STYLE.md](CODING_STYLE.md)
 
 When reference and hardware disagree, **hardware wins**. Validate on the YogaBook
-C930.
+C930. Windows-proven coordinator notes live in
+[PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md).
 
 ---
 

@@ -426,10 +426,9 @@ protocol or addressing.
 
 **Priority order:**
 
-1. **Coordinator input scenario** — Linux cannot leave keyboard scenario (`1`);
-   phantom typing persists. Capture Windows USB transition (keyboard →
-   pen-mouse) per [WINDOWS_CAPTURE.md](WINDOWS_CAPTURE.md), replay in
-   `ite8951_usb.c`.
+1. **Coordinator input scenario** — Windows leave-KB is proven
+   ([PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md)): `0xA6` address `0x03000000`,
+   GET→`0`. Port that encoding into `ite8951_usb.c` (do not require GET=`3`).
 2. **Packaging / boot** — `modprobe.d`, udev softdep, optional autoload on
    `048d:8951`; stable connector naming in DRM.
 3. **Refresh policy** — shadow FB, dirty rects, waveform selection, ghosting
@@ -460,6 +459,7 @@ protocol or addressing.
 │   ├── BLUEPRINT.md          ← roadmap + bring-up log (this file)
 │   ├── ARCHITECTURE.md
 │   ├── CODING_STYLE.md
+│   ├── PROTOCOL_WINDOWS.md   ← validated leave-KB / 0xA6 wire notes
 │   └── WINDOWS_CAPTURE.md    ← dual-boot USB RE checklist
 ├── kernel/
 │   └── eink_drm/             ← active driver (USB + DRM)
