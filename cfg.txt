@@ -1,0 +1,2 @@
+﻿# reg-dump base=0x18001138 count=1 scenario=3
+0x18001138 00280000

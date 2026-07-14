@@ -727,10 +727,15 @@ internal sealed class IteDevice : IDisposable
 
 	public byte[] ReadReg(uint reg)
 	{
-		byte[] ctrl = BuildCtrl(true, 4, OpReadReg, reg, 4, 0, 0, 0);
-		byte[] resp = Exchange(ctrl, 4, "READ_REG");
+		byte[] resp = ReadRegQuiet(reg);
 		Console.WriteLine("  R 0x{0:X8} => {1}", reg, BitConverter.ToString(resp));
 		return resp;
+	}
+
+	public byte[] ReadRegQuiet(uint reg)
+	{
+		byte[] ctrl = BuildCtrl(true, 4, OpReadReg, reg, 4, 0, 0, 0);
+		return Exchange(ctrl, 4, "READ_REG");
 	}
 
 	public void WriteReg(uint reg, byte[] be4)
@@ -740,6 +745,126 @@ internal sealed class IteDevice : IDisposable
 		byte[] ctrl = BuildCtrl(false, 4, OpWriteReg, reg, 4, 0, 0, 0);
 		ExchangeOutPayload(ctrl, be4, "WRITE_REG");
 		Console.WriteLine("  W 0x{0:X8} <= {1}", reg, BitConverter.ToString(be4, 0, 4));
+	}
+
+	/*
+	 * Clone S-einksvr-restart bring-up (enable / KB-class), under our control.
+	 * Skips the poll storm of 0x83 reads and the Homebar A8/94 paints.
+	 * Does NOT send A6 SET 0x01030100 (that is E / Homebar MT leave).
+	 * Expect scenario GET == 1 afterward.
+	 */
+	public byte InitSBringUp()
+	{
+		Console.WriteLine("=== init-s: our EinkSvr-start clone (no Homebar click, no A6 MT SET) ===");
+		try
+		{
+			byte[] sys = GetSys();
+			Console.WriteLine("  GET_SYS {0} B", sys.Length);
+		}
+		catch (Exception ex) { Console.WriteLine("  warn GET_SYS: " + ex.Message); }
+
+		try { CmdExpect(OpReadMem, 0x00000080u, 0x0010, 0, 0, 0, 16, "81"); }
+		catch (Exception ex) { Console.WriteLine("  warn 81: " + ex.Message); }
+
+		try { DynamicCdb(0x0101, 0x0003, 0x0301, 0, true); }
+		catch (Exception ex) { Console.WriteLine("  warn B3: " + ex.Message); }
+
+		byte[] cfg = null;
+		try { ReadRegQuiet(0x18001224u); } catch (Exception ex) { Console.WriteLine("  warn R panel: " + ex.Message); }
+		try { cfg = ReadRegQuiet(0x18001138u); } catch (Exception ex) { Console.WriteLine("  warn R cfg: " + ex.Message); }
+		if (cfg != null && cfg.Length >= 4)
+		{
+			try { WriteReg(0x18001138u, cfg); }
+			catch (Exception ex) { Console.WriteLine("  warn W cfg: " + ex.Message); }
+		}
+
+		try { SetWaveform(0x200); } catch (Exception ex) { Console.WriteLine("  warn A9: " + ex.Message); }
+		try { CmdExpect(OpAe, 0, 0x0100, 0, 0, 0, 1, "AE"); }
+		catch (Exception ex) { Console.WriteLine("  warn AE: " + ex.Message); }
+		try { CmdExpect(OpSetHandwr, 0, 0, 0, 0, 0, 8, "AC"); }
+		catch (Exception ex) { Console.WriteLine("  warn AC: " + ex.Message); }
+
+		try { DynamicCdb(0x0101, 0x0003, 0x0201, 0, true); }
+		catch (Exception ex) { Console.WriteLine("  warn B3: " + ex.Message); }
+		try { SetWaveform(0x200); } catch (Exception ex) { Console.WriteLine("  warn A9: " + ex.Message); }
+
+		byte after = ScenarioGet();
+		Console.WriteLine("=== after init-s: scenario={0} (expect 1=KB if cold enable) ===", after);
+		return after;
+	}
+
+	/* 0x83-only dump. Lines: ADDR=HEX8 VALUE=BE-hex. */
+	public int DumpRegs(string path, uint baseAddr, int wordCount)
+	{
+		if (wordCount < 1)
+			throw new ArgumentException("wordCount");
+		var sb = new StringBuilder();
+		sb.AppendFormat("# reg-dump base=0x{0:X8} count={1} scenario={2}\r\n",
+			baseAddr, wordCount, ScenarioGet());
+		int ok = 0;
+		for (int i = 0; i < wordCount; i++)
+		{
+			uint addr = baseAddr + (uint)(i * 4);
+			try
+			{
+				byte[] v = ReadRegQuiet(addr);
+				sb.AppendFormat("0x{0:X8} {1}\r\n", addr, BitConverter.ToString(v).Replace("-", ""));
+				ok++;
+			}
+			catch (Exception ex)
+			{
+				sb.AppendFormat("0x{0:X8} ERR {1}\r\n", addr, ex.Message.Replace("\r", " ").Replace("\n", " "));
+			}
+			if ((i + 1) % 64 == 0)
+				Console.WriteLine("  … {0}/{1}", i + 1, wordCount);
+		}
+		File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
+		Console.WriteLine("Wrote {0} ok regs → {1}", ok, path);
+		return ok;
+	}
+
+	public static int DiffRegFiles(string beforePath, string afterPath)
+	{
+		var before = ParseRegDump(beforePath);
+		var after = ParseRegDump(afterPath);
+		var keys = new SortedSet<uint>(before.Keys);
+		foreach (uint k in after.Keys)
+			keys.Add(k);
+		int diffs = 0;
+		Console.WriteLine("=== reg-diff {0} → {1} ===", beforePath, afterPath);
+		foreach (uint addr in keys)
+		{
+			string b, a;
+			bool hb = before.TryGetValue(addr, out b);
+			bool ha = after.TryGetValue(addr, out a);
+			if (!hb) { Console.WriteLine("  +0x{0:X8} {1}", addr, a); diffs++; }
+			else if (!ha) { Console.WriteLine("  -0x{0:X8} {1}", addr, b); diffs++; }
+			else if (!string.Equals(a, b, StringComparison.OrdinalIgnoreCase))
+			{
+				Console.WriteLine("  *0x{0:X8} {1} → {2}", addr, b, a);
+				diffs++;
+			}
+		}
+		Console.WriteLine("=== {0} difference(s) ===", diffs);
+		return diffs;
+	}
+
+	static Dictionary<uint, string> ParseRegDump(string path)
+	{
+		var map = new Dictionary<uint, string>();
+		foreach (string line in File.ReadAllLines(path))
+		{
+			if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#"))
+				continue;
+			string[] p = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+			if (p.Length < 2 || !p[0].StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+				continue;
+			if (string.Equals(p[1], "ERR", StringComparison.OrdinalIgnoreCase))
+				continue;
+			uint addr = Convert.ToUInt32(p[0], 16);
+			map[addr] = p[1].ToUpperInvariant();
+		}
+		return map;
 	}
 
 	public void CmdExpect(byte op, uint addr, ushort a1, ushort a2, ushort a3, ushort a4,
@@ -840,6 +965,126 @@ internal sealed class IteDevice : IDisposable
 		return after;
 	}
 
+	/*
+	 * Finger-enable delta from E capture (2026-07-14), after scenario GET=3:
+	 *   0x81 READ_MEM @0x80
+	 *   0xB3 args 0100/0003/0301
+	 *   0x84 display_cfg 0x18001138: wire 00-20-00-00 → 00-28-00-00
+	 *     i.e. BE value |= 0x00080000 (NOT 0x800 — that wrongly yields 00-20-08-00)
+	 * Does not blit Lenovo chrome. Success = live HID 0x0c with ≥2 contacts.
+	 */
+	public const uint RegDisplayCfg = 0x18001138u;
+	public const uint DisplayCfgFingerBit = 0x00080000u;
+
+	static uint ReadBe32(byte[] b, int off)
+	{
+		return ((uint)b[off] << 24) | ((uint)b[off + 1] << 16) |
+			((uint)b[off + 2] << 8) | b[off + 3];
+	}
+
+	static void WriteBe32To(byte[] b, int off, uint v)
+	{
+		b[off] = (byte)(v >> 24);
+		b[off + 1] = (byte)(v >> 16);
+		b[off + 2] = (byte)(v >> 8);
+		b[off + 3] = (byte)v;
+	}
+
+	public void FingerEnable()
+	{
+		Console.WriteLine("=== finger-enable (B3 + display_cfg |= 0x00080000) ===");
+		byte sc = ScenarioGet();
+		Console.WriteLine("scenario={0} (want 3 before this; 0 may also work after leave)", sc);
+
+		try { CmdExpect(OpReadMem, 0x00000080u, 0x0010, 0, 0, 0, 16, "81finger"); }
+		catch (Exception ex) { Console.WriteLine("  warn 81: " + ex.Message); }
+
+		try { DynamicCdb(0x0100, 0x0003, 0x0301, 0, true); }
+		catch (Exception ex) { Console.WriteLine("  warn B3: " + ex.Message); }
+
+		byte[] cfg = ReadReg(RegDisplayCfg);
+		if (cfg == null || cfg.Length < 4)
+			throw new InvalidOperationException("READ display_cfg failed");
+		uint before = ReadBe32(cfg, 0);
+		/* Keep unrelated bits; force finger bit; clear earlier mistaken 0x00000800. */
+		uint after = (before | DisplayCfgFingerBit) & ~0x00000800u;
+		Console.WriteLine("  display_cfg 0x{0:X8} -> 0x{1:X8} (want …28…. not …20-08…)", before, after);
+		if (after == before)
+			Console.WriteLine("  note: finger bit already set");
+		else
+		{
+			byte[] outBe = new byte[4];
+			WriteBe32To(outBe, 0, after);
+			WriteReg(RegDisplayCfg, outBe);
+			byte[] verify = ReadReg(RegDisplayCfg);
+			Console.WriteLine("  verify => 0x{0:X8}", ReadBe32(verify, 0));
+		}
+
+		sc = ScenarioGet();
+		Console.WriteLine("=== after finger-enable: scenario={0} ===", sc);
+		Console.WriteLine("TEST: 2/3 FINGERS on E-Ink. Expect HID 0x0c (not only 0x90).");
+		Console.WriteLine("WinUSB stays open (keeps EinkSvr off MI_00). Panel may still SHOW keyboard art.");
+		Console.WriteLine("Open Notepad on LCD — must not type. Press Enter here when done testing...");
+		Console.ReadLine();
+		sc = ScenarioGet();
+		Console.WriteLine("scenario after test={0} (still want 3)", sc);
+	}
+
+	/* Cold path under our control: mt-enter then finger-enable. No Homebar. */
+	public byte MtArmCold()
+	{
+		byte s = MtEnterCold();
+		FingerEnable();
+		return ScenarioGet();
+	}
+
+	/*
+	 * Best-effort return to firmware keyboard for a clean mt-arm retest.
+	 * Clears finger bit on display_cfg, then A6 SET addr 0x01000000 (scenario<<24).
+	 * If GET stays ≠1, briefly start EinkSvr then stop again (Lenovo re-arms KB).
+	 */
+	public byte KbReset()
+	{
+		Console.WriteLine("=== kb-reset (clear finger bit + A6 SET 0x01000000) ===");
+		byte before = ScenarioGet();
+		Console.WriteLine("before scenario={0}", before);
+
+		try
+		{
+			byte[] cfg = ReadReg(RegDisplayCfg);
+			uint v = ReadBe32(cfg, 0);
+			uint cleared = v & ~DisplayCfgFingerBit & ~0x00000800u;
+			Console.WriteLine("  display_cfg 0x{0:X8} -> 0x{1:X8}", v, cleared);
+			if (cleared != v)
+			{
+				byte[] outBe = new byte[4];
+				WriteBe32To(outBe, 0, cleared);
+				WriteReg(RegDisplayCfg, outBe);
+			}
+		}
+		catch (Exception ex) { Console.WriteLine("  warn cfg: " + ex.Message); }
+
+		try
+		{
+			Console.WriteLine("  A6 SET keyboard 0x01000000...");
+			ScenarioSetHiByte(ScenarioKeyboard);
+		}
+		catch (Exception ex) { Console.WriteLine("  warn A6 KB: " + ex.Message); }
+
+		byte after = ScenarioGet();
+		Console.WriteLine("=== after kb-reset: scenario={0} (want 1) ===", after);
+		if (after != ScenarioKeyboard)
+		{
+			Console.WriteLine("GET≠1. Reliable fallback:");
+			Console.WriteLine("  Set-EinkSvrAutostart.ps1 -Mode Manual -StartNow");
+			Console.WriteLine("  wait for KB/Homebar, then -Mode Disabled -StopNow");
+			Console.WriteLine("  then mt-arm again");
+		}
+		else
+			Console.WriteLine("OK keyboard scenario. Run: EinkWinUsb.exe mt-arm");
+		return after;
+	}
+
 	public bool TrySetScenario(byte want)
 	{
 		/* want==0 via <<24 is address 0 = GET; skip that encoding. */
@@ -931,7 +1176,32 @@ internal sealed class IteDevice : IDisposable
 
 internal static class Program
 {
+	/* reg-diff does not need the device open. */
 	static int Main(string[] args)
+	{
+		if (args.Length >= 1 &&
+			string.Equals(args[0], "reg-diff", StringComparison.OrdinalIgnoreCase))
+		{
+			if (args.Length < 3)
+			{
+				Console.WriteLine("need: reg-diff <before.txt> <after.txt>");
+				return 1;
+			}
+			try
+			{
+				int n = IteDevice.DiffRegFiles(args[1], args[2]);
+				return n == 0 ? 0 : 3;
+			}
+			catch (Exception ex)
+			{
+				Console.Error.WriteLine("ERROR: " + ex.Message);
+				return 1;
+			}
+		}
+		return MainDevice(args);
+	}
+
+	static int MainDevice(string[] args)
 	{
 		if (args.Length < 1)
 		{
@@ -989,6 +1259,20 @@ internal static class Program
 						byte s = dev.MtEnterCold();
 						return s == IteDevice.ScenarioPenMouse ? 0 : 2;
 					}
+					case "finger-enable":
+						dev.FingerEnable();
+						break;
+					case "mt-arm":
+					{
+						byte s = dev.MtArmCold();
+						Console.WriteLine("mt-arm done, scenario={0}", s);
+						return 0;
+					}
+					case "kb-reset":
+					{
+						byte s = dev.KbReset();
+						return s == IteDevice.ScenarioKeyboard ? 0 : 2;
+					}
 					case "fill":
 					{
 						byte gray = 0xff;
@@ -1025,6 +1309,23 @@ internal static class Program
 						Console.WriteLine("Done. Note ghosts / Homebar remnants / MT still live?");
 						break;
 					}
+					case "init-s":
+					{
+						byte s = dev.InitSBringUp();
+						return s == IteDevice.ScenarioKeyboard ? 0 : 2;
+					}
+					case "reg-dump":
+					{
+						string path = args.Length >= 2 ? args[1] : "reg-dump.txt";
+						uint bas = 0x18001100u;
+						int count = 0x80;
+						if (args.Length >= 3)
+							bas = Convert.ToUInt32(args[2], args[2].StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 16 : 10);
+						if (args.Length >= 4)
+							count = Convert.ToInt32(args[3], args[3].StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 16 : 10);
+						dev.DumpRegs(path, bas, count);
+						break;
+					}
 					default:
 						Usage();
 						return 1;
@@ -1047,10 +1348,17 @@ internal static class Program
 		Console.WriteLine("  EinkWinUsb.exe scenario-set <0|1|3>");
 		Console.WriteLine("  EinkWinUsb.exe pen-mouse");
 		Console.WriteLine("  EinkWinUsb.exe mt-replay     # short E A6/B3 subset");
-		Console.WriteLine("  EinkWinUsb.exe mt-enter      # full E ops 1-20 from cold KB");
+		Console.WriteLine("  EinkWinUsb.exe mt-enter       # full E ops 1-20 from cold KB");
+		Console.WriteLine("  EinkWinUsb.exe finger-enable  # B3 + display_cfg |= 0x800 (after GET=3)");
+		Console.WriteLine("  EinkWinUsb.exe mt-arm         # mt-enter + finger-enable (no Homebar)");
+		Console.WriteLine("  EinkWinUsb.exe kb-reset       # clear finger bit + try A6 KB (GET=1)");
+		Console.WriteLine("  EinkWinUsb.exe init-s         # our S enable clone (expect GET=1)");
+		Console.WriteLine("  EinkWinUsb.exe reg-dump [file] [base=0x18001100] [words=0x80]");
+		Console.WriteLine("  EinkWinUsb.exe reg-diff <before.txt> <after.txt>");
 		Console.WriteLine("  EinkWinUsb.exe fill [white|black|gray|0xNN]");
 		Console.WriteLine("  EinkWinUsb.exe stripes");
-		Console.WriteLine("  EinkWinUsb.exe blit-test     # white → black → stripes");
+		Console.WriteLine("  EinkWinUsb.exe blit-test      # white → black → stripes");
 		Console.WriteLine("Stop EinkSvr first: Set-EinkSvrAutostart.ps1 -Mode Manual -StopNow");
+		Console.WriteLine("Guided MT reg delta: ..\\Test-RegDeltaMt.ps1");
 	}
 }

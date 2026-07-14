@@ -128,11 +128,15 @@ ACTION (D-roundtrip):
 		ServiceRestart = $false
 		Prompt = @'
 ACTION (E-multitouch) - MULTITOUCH PRIORITY:
-  Need: no Notepad typing + TWO and THREE simultaneous contacts.
+  Need: no Notepad typing + TWO and THREE simultaneous FINGER contacts.
+  Pen-only mode is NOT enough (often HID 0x90 only, no multitouch 0x0c).
+
   1. Open Notepad on the main LCD.
   2. Homebar / scenario bar -> pen / touchpad / mouse (not keyboard).
-  3. Wait ~3s; touch 1 finger, then 2 together, then 3 together on E-Ink.
-  4. Confirm Notepad stays clean; note which HID device showed MT if possible.
+  3. CRITICAL: tap the finger-enable control (top-left of E-Ink).
+     Without this, the panel stays pen-only even with GET=3.
+  4. Wait ~3s; touch 1 finger, then 2 together, then 3 together on E-Ink.
+  5. Confirm Notepad stays clean and 2/3 fingers actually register.
   Press Enter here when finished.
 '@
 	}
@@ -361,6 +365,8 @@ function Start-UsbCapture {
 		[pscustomobject]$Target
 	)
 
+	# USBPcapCMD prints "Thread started with invalid write handle!" and exits
+	# when launched without usable std handles. Redirect stdout/stderr to files.
 	$argList = @(
 		'--device', $Target.Interface,
 		'--output', $OutputFile,
@@ -374,12 +380,23 @@ function Start-UsbCapture {
 		$argList += @('--devices', $Target.DeviceAddress)
 	}
 
+	$stdoutLog = "$OutputFile.usbpcap.stdout.log"
+	$stderrLog = "$OutputFile.usbpcap.stderr.log"
+	Remove-Item -LiteralPath $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+
 	Write-Host ("Starting USBPcapCMD: {0} -> {1}" -f $Target.Interface, $OutputFile)
 	$proc = Start-Process -FilePath $UsbPcapCmd -ArgumentList $argList `
-		-PassThru -WindowStyle Minimized
+		-PassThru -WindowStyle Hidden `
+		-RedirectStandardOutput $stdoutLog `
+		-RedirectStandardError $stderrLog
 	Start-Sleep -Seconds 1
 	if ($proc.HasExited) {
-		throw ("USBPcapCMD exited immediately (code {0}) opening {1}. If you just installed USBPcap, reboot. Also confirm: Test-Path {1}" -f $proc.ExitCode, $Target.Interface)
+		$outTxt = if (Test-Path -LiteralPath $stdoutLog) { Get-Content -LiteralPath $stdoutLog -Raw } else { '' }
+		$errTxt = if (Test-Path -LiteralPath $stderrLog) { Get-Content -LiteralPath $stderrLog -Raw } else { '' }
+		throw ("USBPcapCMD exited immediately (code {0}) opening {1}.`n  stdout: {2}`n  stderr: {3}`n  Tips: close Wireshark captures on USBPcap1; run elevated; reboot once if filter was just installed." -f `
+			$proc.ExitCode, $Target.Interface,
+			$(if ($outTxt) { $outTxt.Trim() } else { '(empty)' }),
+			$(if ($errTxt) { $errTxt.Trim() } else { '(empty)' }))
 	}
 	return $proc
 }
@@ -387,17 +404,11 @@ function Start-UsbCapture {
 function Stop-UsbCapture {
 	param([System.Diagnostics.Process]$Process)
 	if (-not $Process) { return }
-	if ($Process.HasExited) { return }
-	try {
-		$Process.CloseMainWindow() | Out-Null
-	} catch { }
-	Start-Sleep -Milliseconds 500
 	if (-not $Process.HasExited) {
-		Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+		try { $Process.Kill() } catch { }
+		try { $Process.WaitForExit(5000) | Out-Null } catch { }
 	}
-	# Worker children sometimes linger
 	Get-Process -Name 'USBPcapCMD' -ErrorAction SilentlyContinue |
-		Where-Object { $_.Id -ne $Process.Id } |
 		Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
@@ -456,6 +467,11 @@ function Invoke-GuidedCapture {
 		}
 		Write-Warning ("Replacing empty capture stub: {0}" -f $outFile)
 		Remove-Item -LiteralPath $outFile -Force
+	}
+	elseif ((Test-Path -LiteralPath $outFile) -and $Force) {
+		$bak = '{0}.{1:yyyyMMdd-HHmmss}.bak' -f $outFile, (Get-Date)
+		Move-Item -LiteralPath $outFile -Destination $bak -Force
+		Write-Host ("Backed up previous capture → {0}" -f $bak) -ForegroundColor DarkGray
 	}
 
 	Write-Host ''

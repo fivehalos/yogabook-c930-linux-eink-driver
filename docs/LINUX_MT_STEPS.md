@@ -1,9 +1,9 @@
 # Linux steps — multitouch (Windows RE handoff)
 
 **Audience:** Linux agent / developer on the C930.  
-**Last updated:** 2026-07-13 (end of Windows dual-boot session).  
+**Last updated:** 2026-07-14 (cold `mt-arm` validated on Windows).  
 **Sources:** [PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md), `win-captures/E-usbc-ops.txt`, `E-hid-0x85.txt`,  
-`scripts/windows/eink-winusb/EinkWinUsb.exe` (`mt-enter`, `fill`, `stripes`).
+`scripts/windows/eink-winusb/EinkWinUsb.exe` (`mt-arm`, `mt-enter`, `finger-enable`, `fill`, `stripes`).
 
 Shorter notes: [WINDOWS_MULTITOUCH_BRIEF.md](WINDOWS_MULTITOUCH_BRIEF.md).
 
@@ -23,32 +23,57 @@ That is **not** multitouch.
 
 ### Proven on Windows (keep these)
 
-1. **Homebar** pen/touchpad/mouse → real **1/2/3** contacts on HID report **`0x0c`** (`E-hid-0x85.txt`: byte2 = count).
+1. **Homebar** pen/touchpad/mouse **plus** the E-Ink **finger-enable** control
+   (top-left) → real **1/2/3** contacts on HID report **`0x0c`**
+   (`E-hid-0x85.txt`: byte2 = count). Without finger-enable, mode can stay
+   **pen-only** (scenario GET=`3` + HID **`0x90`**, no `0x0c`) — seen 2026-07-14.
 2. While that mode is live, GET byte1 is **`3`** (not `0`).
 3. After Homebar has armed MT: hard-stop EinkSvr → owner **`fill`/`stripes`** still work (sharp); GET can stay **`3`**. Display ownership ≠ needing Lenovo to paint.
 4. Parallel **`0x90`** can exist on another iface; **MT success = live `0x0c`**, not soft chords on `0x90`.
 
-### Corrected: cold `mt-enter` alone is incomplete
+### Validated: cold `mt-arm` (no Homebar) — 2026-07-14
 
-Fresh reboot, **no EinkSvr / no Homebar**, then `EinkWinUsb.exe mt-enter` (full E ops 1–20):
+With EinkSvr **stopped/disabled**, `EinkWinUsb.exe mt-arm`
+(`mt-enter` + finger-enable) achieved:
+
+| Check | Result |
+|-------|--------|
+| scenario GET | **`3`** |
+| `display_cfg` `0x18001138` | **`0x00280000`** (wire `00-28-00-00`) |
+| Firmware KB typing | **Off** (Notepad clean) |
+| Panel look | May still show old KB art (we did not blit) |
+| Finger MT | User reported multitouch live |
+
+Finger-enable half (after GET=`3`):
+
+1. `0x81` READ_MEM `@0x80` len 16  
+2. `0xB3` CDB `0100 / 0003 / 0301`  
+3. `0x84` `0x18001138` OR **`0x00080000`** (not `0x800`)
+
+No Lenovo paint required for arming. Next: owner `fill`/`stripes` while GET=`3`,
+confirm HID `0x0c` still streams; port sequence to Linux.
+
+### Earlier: cold `mt-enter` alone is incomplete
+
+Fresh reboot, **no EinkSvr / no Homebar**, then `EinkWinUsb.exe mt-enter` (full E ops 1–20)
+**without** the finger-enable half:
 
 | Check | Result |
 |-------|--------|
 | Before | GET=`1` (KB) |
 | After | GET=`3` |
 | Notepad / phantom KB | **Off** |
-| Multitouch / `0x0c` traces | **Not observed** |
+| Multitouch / `0x0c` traces | **Not observed** (pen-only class) |
 
-**Conclusion:** GET=`3` means “left keyboard / pen-mouse scenario,” **not** “digitizer streaming.”  
-Homebar (or equivalent bring-up we have not fully isolated) still **arms** HID `0x0c`. Replaying only the early E USBC block is not enough for cold MT.
+Pen-only Homebar (no top-left finger-enable) similarly yields GET=`3` + HID **`0x90`** only.
 
 ### Two non-KB modes
 
 | Name | Enter | GET | Touch | Notes |
 |------|-------|-----|-------|-------|
 | Bare leave-KB | `0xA6` **`0x03000000`** | **`0`** | **`0x90`** 1 pt | Linux today |
-| Scenario-3 leave | E / `mt-enter` cold | **`3`** | Often **silent** until Homebar-class arm | Leave-typing only if no `0x0c` |
-| **Armed MT** | Homebar pen/touchpad (+ enable stack) | **`3`** | **`0x0c`** N contacts | Real multitouch |
+| Scenario-3 leave | E / `mt-enter` cold | **`3`** | Pen-only / no finger MT until finger bit | Leave-typing off |
+| **Armed MT** | Homebar finger-enable **or** cold `mt-arm` | **`3`** + cfg `0x00280000` | **`0x0c`** N contacts | Real multitouch |
 
 ---
 
@@ -61,13 +86,14 @@ Homebar (or equivalent bring-up we have not fully isolated) still **arms** HID `
 
 ---
 
-## 3. Primary path (still preferred when possible)
+## 3. Primary path (validated cold)
 
-Isolate the minimal USB that **both** sets GET=`3` **and** starts `0x0c` without a GUI Homebar. Candidates: `S-einksvr-restart.pcap` enable/init + E mode entry; diff vs cold `mt-enter`.
+**`mt-arm` = `mt-enter` (E ops 1–20) + finger-enable** (`0xB3` + `display_cfg |= 0x00080000`).
+No Homebar / EinkSvr required once MI_00 is free.
 
-Until that exists, **do not** tell Linux “GET=`3` from `mt-enter` = MT done.”
+Do **not** tell Linux “GET=`3` from `mt-enter` alone = MT done.” Finger bit is mandatory.
 
-Opcode table for the **leave / scenario** half (E ops 1–20) remains in §6 — useful, but **insufficient alone**.
+Opcode table for the leave half is in §6; finger-enable is in §1 (validated).
 
 ---
 
@@ -120,7 +146,7 @@ Opcode table for the **leave / scenario** half (E ops 1–20) remains in §6 —
 1. Keep DRM working.
 2. Gate `reapply_draw_input` / `TOUCH_PEN` when experimenting with MT.
 3. Implement / finish **`0x0c` → uinput** path (parser exists; auto-hid pick still prefers `0x90`).
-4. Treat **fallback §4** as the default product strategy until cold arm is proven.
+4. Port **`mt-arm`** to Linux; keep §4 fallback only if port fails on-device.
 
 ### When dual-booting Windows again
 
@@ -208,7 +234,7 @@ Fallback / Homebar-armed:
 | `docs/PROTOCOL_WINDOWS.md` | Wire notes; update with cold vs armed |
 | `win-captures/E-*` | Mode + HID evidence |
 | `win-captures/S-einksvr-restart.pcap` | Enable/init to clone for fallback |
-| `scripts/windows/eink-winusb/` | `mt-enter`, `fill`, `stripes`, `scenario-get` |
+| `scripts/windows/eink-winusb/` | `mt-arm`, `mt-enter`, `finger-enable`, `fill`, `stripes` |
 | `kernel/.../ite8951_usb.c` | Today’s leave + TOUCH_PEN |
 | `userspace/eink-touchpad/` | `0x0c` parse + uinput |
 
@@ -216,4 +242,4 @@ Fallback / Homebar-armed:
 
 ## 10. One-paragraph summary
 
-Bare Linux leave (`0x03000000` → GET=`0` + `TOUCH_PEN`) yields single-point **`0x90`**. Homebar arms real multitouch on HID **`0x0c`** with GET=**`3`**; owner DRM blits can then take over. Cold **`mt-enter`** reaches GET=`3` and kills KB typing but **does not** by itself show `0x0c`. Until the missing arming opcodes are isolated, the **fallback** is: clone EinkSvr/Homebar bring-up → user enters MT → our blit + `0x0c`→uinput touchpad, without staying on Lenovo’s display stack.
+Bare Linux leave (`0x03000000` → GET=`0` + `TOUCH_PEN`) yields single-point **`0x90`**. Cold **`mt-arm`** (E leave to GET=`3` + `display_cfg |= 0x00080000`) arms finger multitouch without Homebar — validated on Windows Jul 2026 (`cfg=0x00280000`, no typing, MT reported). Owner `0xA8`/`0x94` blits replace KB ghost art; Linux should port `mt-arm` and map HID **`0x0c`** → uinput, without `TOUCH_PEN` collapse.

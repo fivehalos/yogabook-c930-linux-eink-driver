@@ -53,11 +53,24 @@ $names = @(
 if ($StopNow) {
 	if ($svc.Status -ne 'Stopped') {
 		Stop-Service -Name 'EinkSvr' -Force -ErrorAction SilentlyContinue
-		Start-Sleep -Seconds 2
+		try { $svc.WaitForStatus('Stopped', '00:00:15') } catch { }
 	}
-	Get-Process -Name $names -ErrorAction SilentlyContinue |
-		Stop-Process -Force -ErrorAction SilentlyContinue
-	Write-Host 'Stopped EinkSvr + EInk* processes.'
+	# Lenovo stack often respawns EInkSvr once after Stop-Service — kill until gone.
+	$deadline = (Get-Date).AddSeconds(20)
+	do {
+		Get-Process -Name $names -ErrorAction SilentlyContinue |
+			Stop-Process -Force -ErrorAction SilentlyContinue
+		Start-Sleep -Milliseconds 400
+		$left = @(Get-Process -Name $names -ErrorAction SilentlyContinue)
+	} while ($left.Count -gt 0 -and (Get-Date) -lt $deadline)
+
+	$left = @(Get-Process -Name $names -ErrorAction SilentlyContinue)
+	if ($left.Count -gt 0) {
+		Write-Warning ("Still running after kill loop: {0}" -f (($left | ForEach-Object { "{0}({1})" -f $_.ProcessName, $_.Id }) -join ', '))
+		Write-Warning 'Use -Mode Disabled if something keeps restarting EinkSvr.'
+	} else {
+		Write-Host 'Stopped EinkSvr + EInk* processes (none left).' -ForegroundColor Green
+	}
 }
 
 if ($StartNow) {

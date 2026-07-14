@@ -49,20 +49,25 @@ Or use `scripts/fetch-references.sh`.
 ## Windows Lenovo open source
 
 **Source:** Lenovo Yoga Book C930 open-source compliance package
+(`YOGA.BOOK.2.Eink.Reader_v1.0.0.5`, GPLv3)
 
 | Link | Description |
 |------|-------------|
-| [Open Source Code — Yoga Book C930](https://pcsupport.lenovo.com/us/en/products/tablets/yoga-series/yoga-book-c930/downloads/ds503569) | Official Lenovo support download page |
-| [Lenovo open source portal (search)](https://support.lenovo.com/us/en/solutions/lnvo-lxcaopensource) | Alternative entry if regional link differs |
+| [Direct CDN tarball](https://download.lenovo.com/consumer/mobiles/yoga.book.2.e-reader_v1.0.0.5.tar.gz) | `yoga.book.2.e-reader_v1.0.0.5.tar.gz` (~450 MB) |
+| [Open Source Code — Yoga Book C930](https://pcsupport.lenovo.com/us/en/products/tablets/yoga-series/yoga-book-c930/downloads/ds503569) | Support page (same package) |
 
-Download the **Open Source Code** archive from the support page, extract, and
-place the `YOGA.BOOK.2.Eink.Reader_v1.0.0.5` tree at:
+**SHA256:** `05ba9b512e54bc4a59335adec5aaf04dd4d9b2044b1fb7ad28a4d5a652e86ce9`
 
+```bash
+mkdir -p reference/windows-lenovo
+curl -L -o reference/windows-lenovo/yoga.book.2.e-reader_v1.0.0.5.tar.gz \
+  https://download.lenovo.com/consumer/mobiles/yoga.book.2.e-reader_v1.0.0.5.tar.gz
+tar -xzf reference/windows-lenovo/yoga.book.2.e-reader_v1.0.0.5.tar.gz \
+  -C reference/windows-lenovo
+# → reference/windows-lenovo/YOGA.BOOK.2.Eink.Reader_v1.0.0.5/
 ```
-reference/windows-lenovo/YOGA.BOOK.2.Eink.Reader_v1.0.0.5/
-```
 
-**License:** GPLv3 (Lenovo headers). **Not included in the zip:** `EinkSvr.exe`,
+**License:** GPLv3 (Lenovo headers). **Not in the archive:** `EinkSvr.exe`,
 `itetcon.dll` (closed binaries).
 
 ### Key files (after extract)

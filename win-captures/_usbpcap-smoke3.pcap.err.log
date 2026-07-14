@@ -1,0 +1,1 @@
+Packets larger than 65520 bytes won't be captured due to too small buffer.

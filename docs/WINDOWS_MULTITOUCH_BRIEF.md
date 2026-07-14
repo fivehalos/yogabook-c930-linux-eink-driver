@@ -3,13 +3,14 @@
 **Status: Windows validated Jul 2026.** This is no longer a hunt doc.
 
 **Full method for the Linux agent:** [LINUX_MT_STEPS.md](LINUX_MT_STEPS.md)  
-(use that file as the primary handoff — situation, cold vs armed MT, **fallback Homebar clone plan**, acceptance tests).
+(primary handoff — cold **`mt-arm`** validated on Windows 2026-07-14).
 
 Wire detail: [PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md). Extracts: `win-captures/E-usbc-ops.txt`, `E-hid-0x85.txt`.
 
-**2026-07-13 correction:** cold `mt-enter` → GET=`3` + no KB, but **no `0x0c` MT** without Homebar-class arming. GET=`3` alone is not multitouch.
+**2026-07-14:** cold `mt-arm` = `mt-enter` + `display_cfg |= 0x00080000` → GET=`3`, cfg=`0x00280000`, finger MT without Homebar.  
+`mt-enter` alone is still incomplete (scenario leave ≠ finger arm).
 
-If Linux “can’t replicate,” assume it is still on the **bare leave-KB / draw-routing** path below — not an **armed** Homebar MT session.
+If Linux “can’t replicate,” assume it is still on the **bare leave-KB / draw-routing** path below — not **`mt-arm`**.
 
 ---
 
@@ -18,7 +19,7 @@ If Linux “can’t replicate,” assume it is still on the **bare leave-KB / dr
 | Mode | How entered | `0xA6` GET byte1 | Touch HID | Owner blit |
 |------|-------------|------------------|-----------|------------|
 | **Bare leave-KB** | `0xA6` addr `0x03000000` (± optional B3/A9) | **`0`** | Single-contact **`0x90`** | Yes |
-| **MT / pen-mouse latch** | Homebar pen/touchpad → firmware latch | **`3`** | Multi-contact **`0x0c`** (EP interrupt / hidraw) | Yes |
+| **MT / pen-mouse latch** | Cold `mt-arm` or Homebar+finger-enable | **`3`** + cfg `0x00280000` | Multi-contact **`0x0c`** (EP interrupt / hidraw) | Yes |
 
 Linux today mostly achieves row 1 (`touch_userspace_config=1` → leave + `0xAC`/`0xB3`/`0xAF TOUCH_PEN=0x03`). That is **solved leave-typing**, not multitouch.
 
@@ -29,11 +30,11 @@ GET=`0` + live `0x90` is a **fail** for this mission (even if soft-chords work).
 
 ## What Windows proved (do not over-claim)
 
-1. Homebar → pen/touchpad/mouse → **real 1/2/3 contacts** on report **`0x0c`** (`E-hid-0x85.txt`).
-2. In that armed mode, GET byte1 is **`3`**.
+1. Homebar → pen/touchpad + **finger-enable** → **real 1/2/3 contacts** on report **`0x0c`** (`E-hid-0x85.txt`).
+2. In that armed mode, GET byte1 is **`3`** and `display_cfg` has **`0x00080000`**.
 3. After arming: owner blit with EinkSvr stopped works (sharp `stripes`).
-4. Cold `mt-enter` (no Homebar) → GET=`3`, KB off, **`0x0c` not observed** — scenario leave ≠ digitizer arm.
-5. Fallback product path: clone EinkSvr/Homebar bring-up → user MT → our blit + `0x0c`→uinput ([LINUX_MT_STEPS.md](LINUX_MT_STEPS.md) §4).
+4. Cold **`mt-arm`** (no Homebar) → same GET=`3` + cfg=`0x00280000` + finger MT — **validated 2026-07-14**.
+5. Cold **`mt-enter` alone** → GET=`3`, KB off, pen-only (no finger bit).
 
 Parallel **`0x90`** can still appear; **MT is `0x0c`**, not ABS_MT under the draw route.
 

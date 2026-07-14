@@ -50,7 +50,6 @@ Response + status may arrive as two short IN transfers; treat them separately.
 | GET | `0x00000000` | 4 B; **byte1** = live scenario | `1` = firmware keyboard; `0` = non-KB / draw (bare leave); **`3` = pen-mouse / MT latch** |
 | SET keyboard | `0x01000000` (`1 << 24`) | 4 B (often echoes) | Seen in `C-penmouse.pcap` Homebar KB path |
 | Leave keyboard (bare) | `0x03000000` (`3 << 24`) | then GET → **byte1=`0`** | Stops Notepad typing; **single-contact** HID `0x90` class on Linux |
-| Homebar / MT leave | early `0xB3`/`0xA9` + **`0xA6` addr `0x01030100`** (E capture) | then GET → **byte1=`3`** | **Validated Jul 2026:** multitouch hangs after EinkSvr stop; report `0x0c` (≥2 contacts) |
 | KB arm (legacy) | `0x01010000` | echo | Seen in C; not required for leave-KB |
 
 Notes:
@@ -58,10 +57,10 @@ Notes:
 - Do **not** use low DWORD `address = 1` or `address = 3` as the primary encoding.
 - Two different non-keyboard outcomes after leave:
   - **GET=`0`**: WinUSB `pen-mouse` / bare `0x03000000` — enough to stop typing; Linux still only gets single-point `0x90`.
-  - **GET=`3`**: Homebar multitouch path — firmware **latches** pen-mouse; survives EinkSvr stop; HID multi-contact `0x0c` on EP `0x85`.
-- `0x03000000` alone was **not** enough for MT; Homebar E traffic uses `0xA6` **`0x01030100`** plus `0xB3`/`0xA9`/`0xAE`/`0xAC`.
+  - **GET=`3`**: MT leave path (`0xA6` `0x01030100`…); finger multitouch needs **`display_cfg |= 0x00080000`** → HID `0x0c` on EP `0x85`.
+- `0x03000000` alone was **not** enough for MT; cold leave uses `0xA6` **`0x01030100`** plus `0xB3`/`0xA9`/`0xAE`/`0xAC`.
 - Re-enter keyboard from `0` via `0x01000000` alone did **not** latch in tool tests —
-  open. Same open for exit from GET=`3`.
+  open. Same open for exit from GET=`3` (use brief EinkSvr bounce for KB retest).
 
 ---
 
@@ -82,18 +81,23 @@ Replay: `scripts/windows/eink-winusb/EinkWinUsb.exe pen-mouse`
 
 ## Multitouch latch + owner blit (validated Jul 2026)
 
-**Armed path (works):**
+**Cold armed path (preferred — no Homebar):**
 
-1. Homebar → pen/touchpad (MT); confirm ≥2 contacts on HID **`0x0c`**.
-2. Stop EinkSvr hard so WinUSB can open MI_00.
-3. `scenario-get` → **byte1=`3`**; owner `fill` / `stripes` at `0x00382f30` — sharp; no Lenovo paint required.
+1. EinkSvr stopped/disabled; `EinkWinUsb.exe mt-arm`  
+   (`mt-enter` = E ops 1–20 → GET=`3`, then finger-enable).
+2. Finger-enable: `0xB3` `0100/0003/0301` + **`0x84` `0x18001138` OR `0x00080000`**  
+   (wire `00-20-00-00` → `00-28-00-00`).
+3. Expect GET=`3`, cfg=`0x00280000`, no LCD typing, finger MT / HID `0x0c`.
+4. Owner `fill` / `stripes` at `0x00382f30` can replace KB ghost art.
 
-**Cold path (incomplete):**
+**Homebar path (also works):** pen/touchpad + **top-left finger-enable** → same latch; then stop EinkSvr and take MI_00.
 
-- Fresh boot, no EinkSvr: `EinkWinUsb.exe mt-enter` (E ops 1–20) → GET=`3`, KB off, but **no observed `0x0c` / MT traces**.
-- So GET=`3` ≠ digitizer armed. Extra Homebar/EinkSvr enable still required for live multitouch.
+**Incomplete alone:**
 
-**Linux handoff:** [LINUX_MT_STEPS.md](LINUX_MT_STEPS.md) — prefer isolating cold arming; **fallback** = clone EinkSvr/Homebar bring-up → user MT → our blit + `0x0c`→uinput.
+- `mt-enter` without finger bit → GET=`3`, KB off, **pen-only** (often `0x90`, no `0x0c`).
+- Pen-only Homebar (no finger-enable) → same miss.
+
+**Linux handoff:** [LINUX_MT_STEPS.md](LINUX_MT_STEPS.md) — port `mt-arm`; do not run `TOUCH_PEN` after arm.
 
 ---
 
@@ -106,19 +110,17 @@ Replay: `scripts/windows/eink-winusb/EinkWinUsb.exe pen-mouse`
 | `0xAE` | Present in E MT entry (`arg1=0x0100`) — open |
 | `0xAC` | Handwriting region clear (`addr=0`) |
 | `0xA9` | Waveform (`0x0200` on mode transitions) |
-| `0x83`/`0x84` | Read/write regs (`0x18001224` panel mode, `0x18001138` display_cfg) |
+| `0x83`/`0x84` | Read/write regs — **`0x18001138` display_cfg**; finger MT bit **`0x00080000`** |
 | `0x80` | GET_SYS doorknock |
 | `0xA8`/`0x94` | LD_IMG / DPY blit — owner path works after Homebar-armed GET=`3` |
 
-Full Homebar blit / cold enable (`S-einksvr-restart.pcap`) is separate from
-leave-KB; likely part of **arming** `0x0c`.
+Full Homebar blit / cold enable (`S-einksvr-restart.pcap`) is KB-class bring-up
+(GET=`1`); not the finger-enable delta.
 
 ---
 
 ## Open questions
 
 - Reliable **re-enter keyboard** from scenario `0` or `3` without EinkSvr
-- Exact `0xB3` / `0xAF` / `0xAE` field map vs Lenovo structs
-- **What beyond E ops 1–20 arms HID `0x0c`** (S-enable? Homebar click delta?)
-- Does `0x0c` still stream after EinkSvr stop if Homebar armed MT first? (re-confirm on next Windows session)
-- Fallback: minimal EinkSvr/Homebar clone for bring-up + user MT, then Linux blit/uinput
+- Exact `0xB3` / `0xAE` field map vs Lenovo structs (finger path uses CDB `0100/0003/0301`)
+- Linux: confirm `0x0c`→uinput + DRM blit after ported `mt-arm`
