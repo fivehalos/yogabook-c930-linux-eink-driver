@@ -148,15 +148,26 @@ internal sealed class IteDevice : IDisposable
 	public const byte OpGetSys = 0x80;
 	public const byte OpReadReg = 0x83;
 	public const byte OpWriteReg = 0x84;
+	public const byte OpDpyArea = 0x94;
 	public const byte OpScenario = 0xA6;
+	public const byte OpLdImg = 0xA8;
 	public const byte OpSetWaveform = 0xA9;
 	public const byte OpSetHandwr = 0xAC;
 	public const byte OpSetTpArea = 0xAF;
+	public const byte OpGetDpyStatus = 0xB1;
 	public const byte OpDynamic = 0xB3;
 
 	public const byte ScenarioNormal = 0;
 	public const byte ScenarioKeyboard = 1;
 	public const byte ScenarioPenMouse = 3;
+
+	/* Linux-validated xfer/blit base (do not use GET_SYS image_buf). */
+	public const uint ImageBufBase = 0x00382f30u;
+	public const uint PanelWidth = 1920;
+	public const uint PanelHeight = 1080;
+	public const uint MaxXferBytes = 61440; /* 1920×32 */
+	public const uint WaveformCurrent = 0xff;
+	public const int DpyStatusBytes = 136;
 
 	static readonly byte[] UsbcHeader = { 0x55, 0x53, 0x42, 0x43, 0x61, 0x89, 0x51, 0x89 };
 
@@ -468,7 +479,169 @@ internal sealed class IteDevice : IDisposable
 	{
 		BulkOut(ctrl, step + "-ctrl");
 		BulkOut(payload, step + "-payload");
-		return BulkIn(64, step + "-status");
+		byte[] status = BulkIn(64, step + "-status");
+		DrainStatus(step, status);
+		return status;
+	}
+
+	public void WaitDisplayReady(int timeoutMs)
+	{
+		DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+		for (;;)
+		{
+			byte[] ctrl = BuildCtrl(true, DpyStatusBytes, OpGetDpyStatus, 0, 0, 0, 0, 0);
+			byte[] resp = Exchange(ctrl, DpyStatusBytes, "DPY_STATUS");
+			if (resp.Length < 6)
+				throw new InvalidOperationException("short DPY_STATUS");
+			ushort busy = BitConverter.ToUInt16(resp, 4); /* LE engine_busy */
+			if (busy == 0)
+				return;
+			if (DateTime.UtcNow > deadline)
+				throw new TimeoutException("display engine busy timeout");
+			System.Threading.Thread.Sleep(50);
+		}
+	}
+
+	/*
+	 * LD_IMG: packed w*h bytes at base+bufOffset (Linux path).
+	 * Full-frame stripes use bufOffset = y * PanelWidth.
+	 */
+	public void LoadPixels(uint bufOffset, uint w, uint h, byte[] pixels)
+	{
+		if (w == 0 || h == 0)
+			throw new ArgumentException("empty region");
+		long expected = (long)w * h;
+		if (pixels == null || pixels.Length < expected)
+			throw new ArgumentException("pixel buffer short");
+		if (expected > MaxXferBytes)
+			throw new ArgumentException("region exceeds 61440 byte LD_IMG limit");
+
+		uint loadAddr = ImageBufBase + bufOffset;
+		byte[] slice = pixels;
+		if (pixels.Length != expected)
+		{
+			slice = new byte[expected];
+			Buffer.BlockCopy(pixels, 0, slice, 0, (int)expected);
+		}
+		byte[] ctrl = BuildCtrl(false, (uint)expected, OpLdImg, loadAddr, 0, 0,
+			(ushort)w, (ushort)h);
+		ExchangeOutPayload(ctrl, slice, "LD_IMG");
+	}
+
+	/* Blit mem_addr = base + bufOffset - x - 1920*y (BLUEPRINT). */
+	public void Blit(uint bufOffset, uint x, uint y, uint w, uint h, uint waveform)
+	{
+		WaitDisplayReady(10000);
+		uint memAddr = ImageBufBase + bufOffset - x - PanelWidth * y;
+		byte[] payload = new byte[24];
+		WriteBe32(payload, 0, memAddr);
+		WriteBe32(payload, 4, waveform);
+		WriteBe32(payload, 8, x);
+		WriteBe32(payload, 12, y);
+		WriteBe32(payload, 16, w);
+		WriteBe32(payload, 20, h);
+		byte[] ctrl = BuildCtrl(false, (uint)payload.Length, OpDpyArea, 0, 0, 0, 0, 0);
+		Console.WriteLine("  blit mem=0x{0:X8} wf=0x{1:X} ({2},{3}) {4}x{5}",
+			memAddr, waveform, x, y, w, h);
+		ExchangeOutPayload(ctrl, payload, "BLIT");
+		WaitDisplayReady(10000);
+	}
+
+	public void FillRect(uint x, uint y, uint w, uint h, byte gray)
+	{
+		const uint stripeH = 32;
+		uint endY = y + h;
+		/* FB-layout store: packed full-width rows live at base + y*stride (+x). */
+		for (uint row = y; row < endY; )
+		{
+			uint th = Math.Min(stripeH, endY - row);
+			uint bytes = w * th;
+			byte[] pix = new byte[bytes];
+			for (int i = 0; i < pix.Length; i++)
+				pix[i] = gray;
+			uint bufOff = row * PanelWidth + x;
+			LoadPixels(bufOff, w, th, pix);
+			row += th;
+		}
+		/* bufOffset matches FB origin used above (content for dest starts at base+0). */
+		Blit(0, x, y, w, h, WaveformCurrent);
+	}
+
+	public void FillScreen(byte gray)
+	{
+		Console.WriteLine("Fill screen gray=0x{0:X2} ({1}x{2})...", gray, PanelWidth, PanelHeight);
+		const uint stripeH = 32;
+		for (uint row = 0; row < PanelHeight; )
+		{
+			uint th = Math.Min(stripeH, PanelHeight - row);
+			byte[] pix = new byte[PanelWidth * th];
+			for (int i = 0; i < pix.Length; i++)
+				pix[i] = gray;
+			LoadPixels(row * PanelWidth, PanelWidth, th, pix);
+			row += th;
+		}
+		Blit(0, 0, 0, PanelWidth, PanelHeight, WaveformCurrent);
+		Console.WriteLine("Fill done.");
+	}
+
+	/* Alternating 64px bands — easy to see what a blit clears vs ghost. */
+	public void FillStripes()
+	{
+		Console.WriteLine("Fill horizontal stripes (64px black/white)...");
+		const uint band = 64;
+		const uint stripeH = 32;
+		for (uint y = 0; y < PanelHeight; y += band)
+		{
+			uint h = Math.Min(band, PanelHeight - y);
+			byte gray = ((y / band) % 2 == 0) ? (byte)0x00 : (byte)0xff;
+			for (uint row = y; row < y + h; )
+			{
+				uint th = Math.Min(stripeH, y + h - row);
+				byte[] pix = new byte[PanelWidth * th];
+				for (int i = 0; i < pix.Length; i++)
+					pix[i] = gray;
+				LoadPixels(row * PanelWidth, PanelWidth, th, pix);
+				row += th;
+			}
+		}
+		Blit(0, 0, 0, PanelWidth, PanelHeight, WaveformCurrent);
+		Console.WriteLine("Stripes done.");
+	}
+
+	/*
+	 * Replay early E-multitouch mode-entry (Homebar path) without EinkSvr.
+	 * A6 uses addr 0x01030100 as seen in E-multitouch-penmouse.pcap.
+	 */
+	public void MtModeReplay()
+	{
+		Console.WriteLine("Before MT replay: scenario GET...");
+		byte before = ScenarioGet();
+		Console.WriteLine("scenario={0}", before);
+
+		Console.WriteLine("B3 0101/0003/0301 + A9 + A6 0x01030100...");
+		try { DynamicCdb(0x0101, 0x0003, 0x0301, 0); }
+		catch (Exception ex) { Console.WriteLine("  warn: " + ex.Message); }
+		try { SetWaveform(0x200); } catch (Exception ex) { Console.WriteLine("  warn: " + ex.Message); }
+		{
+			byte[] ctrl = BuildCtrl(true, 4, OpScenario, 0x01030100u, 0, 0, 0, 0);
+			byte[] resp = Exchange(ctrl, 4, "SCENARIO_MT");
+			Console.WriteLine("  A6 0x01030100 rsp: {0}",
+				BitConverter.ToString(resp, 0, Math.Min(resp.Length, 8)));
+		}
+
+		Console.WriteLine("B3 0100/0003/0301 + A9 + A6 0x01030100...");
+		try { DynamicCdb(0x0100, 0x0003, 0x0301, 0); }
+		catch (Exception ex) { Console.WriteLine("  warn: " + ex.Message); }
+		try { SetWaveform(0x200); } catch (Exception ex) { Console.WriteLine("  warn: " + ex.Message); }
+		{
+			byte[] ctrl = BuildCtrl(true, 4, OpScenario, 0x01030100u, 0, 0, 0, 0);
+			byte[] resp = Exchange(ctrl, 4, "SCENARIO_MT2");
+			Console.WriteLine("  A6 0x01030100 rsp: {0}",
+				BitConverter.ToString(resp, 0, Math.Min(resp.Length, 8)));
+		}
+
+		byte after = ScenarioGet();
+		Console.WriteLine("After MT replay: scenario={0} (want != 1)", after);
 	}
 
 	public byte[] GetSys()
@@ -677,6 +850,45 @@ internal static class Program
 					case "pen-mouse":
 						dev.PenMouse();
 						break;
+					case "mt-replay":
+						dev.MtModeReplay();
+						break;
+					case "fill":
+					{
+						byte gray = 0xff;
+						if (args.Length >= 2)
+						{
+							string a = args[1].ToLowerInvariant();
+							if (a == "black" || a == "0")
+								gray = 0x00;
+							else if (a == "white" || a == "ff" || a == "0xff")
+								gray = 0xff;
+							else if (a == "gray" || a == "80")
+								gray = 0x80;
+							else
+								gray = Convert.ToByte(args[1], args[1].StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 16 : 10);
+						}
+						dev.FillScreen(gray);
+						break;
+					}
+					case "stripes":
+						dev.FillStripes();
+						break;
+					case "blit-test":
+					{
+						Console.WriteLine("=== blit-test: white ===");
+						dev.FillScreen(0xff);
+						Console.WriteLine("Look at E-Ink: what cleared? what ghosted? Enter...");
+						Console.ReadLine();
+						Console.WriteLine("=== blit-test: black ===");
+						dev.FillScreen(0x00);
+						Console.WriteLine("Look again. Enter...");
+						Console.ReadLine();
+						Console.WriteLine("=== blit-test: stripes ===");
+						dev.FillStripes();
+						Console.WriteLine("Done. Note ghosts / Homebar remnants / MT still live?");
+						break;
+					}
 					default:
 						Usage();
 						return 1;
@@ -698,6 +910,10 @@ internal static class Program
 		Console.WriteLine("  EinkWinUsb.exe scenario-get");
 		Console.WriteLine("  EinkWinUsb.exe scenario-set <0|1|3>");
 		Console.WriteLine("  EinkWinUsb.exe pen-mouse");
+		Console.WriteLine("  EinkWinUsb.exe mt-replay     # E-capture A6/B3 path");
+		Console.WriteLine("  EinkWinUsb.exe fill [white|black|gray|0xNN]");
+		Console.WriteLine("  EinkWinUsb.exe stripes");
+		Console.WriteLine("  EinkWinUsb.exe blit-test     # white → black → stripes");
 		Console.WriteLine("Stop EinkSvr first: Set-EinkSvrAutostart.ps1 -Mode Manual -StopNow");
 	}
 }

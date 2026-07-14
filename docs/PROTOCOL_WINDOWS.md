@@ -47,24 +47,25 @@ Response + status may arrive as two short IN transfers; treat them separately.
 
 | Op | Address | Response | Meaning |
 |----|---------|----------|---------|
-| GET | `0x00000000` | 4 B; **byte1** = live scenario | `1` = firmware keyboard; `0` = non-keyboard / draw path |
+| GET | `0x00000000` | 4 B; **byte1** = live scenario | `1` = firmware keyboard; `0` = non-KB / draw (bare leave); **`3` = pen-mouse / MT latch** |
 | SET keyboard | `0x01000000` (`1 << 24`) | 4 B (often echoes) | Seen in `C-penmouse.pcap` Homebar KB path |
-| Leave keyboard | `0x03000000` (`3 << 24`) | then GET → **byte1=`0`** | **Validated** with EinkSvr stopped: stops Notepad phantom typing |
+| Leave keyboard (bare) | `0x03000000` (`3 << 24`) | then GET → **byte1=`0`** | Stops Notepad typing; **single-contact** HID `0x90` class on Linux |
+| Homebar / MT leave | early `0xB3`/`0xA9` + **`0xA6` addr `0x01030100`** (E capture) | then GET → **byte1=`3`** | **Validated Jul 2026:** multitouch hangs after EinkSvr stop; report `0x0c` (≥2 contacts) |
 | KB arm (legacy) | `0x01010000` | echo | Seen in C; not required for leave-KB |
 
 Notes:
 
 - Do **not** use low DWORD `address = 1` or `address = 3` as the primary encoding.
-- Success for “stop typing” is **GET ≠ `1`**, usually **`0`**. Firmware does **not**
-  GET-report `3` after a working leave-KB.
-- `0x03000000` was **not** observed in Homebar `C` traffic (EinkSvr uses more
-  `0xB3`/`0xAF`); the WinUSB tool proved `0x03000000` alone is sufficient to exit KB.
+- Two different non-keyboard outcomes after leave:
+  - **GET=`0`**: WinUSB `pen-mouse` / bare `0x03000000` — enough to stop typing; Linux still only gets single-point `0x90`.
+  - **GET=`3`**: Homebar multitouch path — firmware **latches** pen-mouse; survives EinkSvr stop; HID multi-contact `0x0c` on EP `0x85`.
+- `0x03000000` alone was **not** enough for MT; Homebar E traffic uses `0xA6` **`0x01030100`** plus `0xB3`/`0xA9`/`0xAE`/`0xAC`.
 - Re-enter keyboard from `0` via `0x01000000` alone did **not** latch in tool tests —
-  open.
+  open. Same open for exit from GET=`3`.
 
 ---
 
-## Minimal leave-keyboard sequence (tool-proven)
+## Minimal leave-keyboard sequence (tool-proven — stops typing only)
 
 EinkSvr stopped; open WinUSB MI_00:
 
@@ -79,27 +80,40 @@ Replay: `scripts/windows/eink-winusb/EinkWinUsb.exe pen-mouse`
 
 ---
 
+## Multitouch latch + owner blit (validated Jul 2026)
+
+1. Homebar → pen/touchpad (MT); confirm ≥2 contacts.
+2. Stop EinkSvr hard (`Stop-Service` + kill `EInk*`) so WinUSB can open MI_00.
+3. `scenario-get` → **byte1=`3`** while still MT (`E-multitouch-penmouse.pcap` path).
+4. Owner `fill white` / `fill black` / `stripes` (`0xA8` + `0x94` at `0x00382f30`) — **sharp stripes**; no firmware/Homebar blit required.
+5. Optional: `EinkWinUsb.exe mt-replay` (E early `0xB3`/`0xA9`/`0xA6 0x01030100`); GET stays `3`.
+
+Linux implication: treat GET=`3` as the MT/pen-mouse success target, not only “≠1”. Bare leave that yields GET=`0` is a different input path.
+
+---
+
 ## Related opcodes (seen; not fully specified here)
 
-| Op | Role in C / S |
+| Op | Role in C / S / E |
 |----|----------------|
 | `0xB3` | Dynamic flags — Windows often packs values **in CDB args**, no payload |
 | `0xAF` | TP areas — Windows often packs geometry **in CDB**; IN echo ~10 B |
+| `0xAE` | Present in E MT entry (`arg1=0x0100`) — open |
 | `0xAC` | Handwriting region clear (`addr=0`) |
 | `0xA9` | Waveform (`0x0200` on mode transitions) |
 | `0x83`/`0x84` | Read/write regs (`0x18001224` panel mode, `0x18001138` display_cfg) |
 | `0x80` | GET_SYS doorknock |
+| `0xA8`/`0x94` | LD_IMG / DPY blit — owner path works with GET=`3` and EinkSvr stopped |
 
 Full Homebar blit / cold enable (`S-einksvr-restart.pcap`) is separate from
-leave-KB.
+leave-KB / MT latch.
 
 ---
 
 ## Open questions
 
-- Reliable **re-enter keyboard** from scenario `0` without EinkSvr
-- Exact `0xB3` / `0xAF` field map vs Lenovo structs
-- Whether Linux must also send B3/AF after `0x03000000`, or A6 alone is enough
-- Port: use `(u32)scenario << 24` in `ite8951_try_set_coordinator_scenario()`;
-  treat GET=`0` after requesting pen-mouse as success — **done in kernel**
-  (`ITE8951_SCENARIO_ADDR` / `ite8951_scenario_satisfied`).
+- Reliable **re-enter keyboard** from scenario `0` or `3` without EinkSvr
+- Exact `0xB3` / `0xAF` / `0xAE` field map vs Lenovo structs
+- Minimal subset that latches GET=`3` + HID `0x0c` without Homebar (isolate vs full E sequence)
+- Port: prefer Homebar MT entry (GET=`3`) for Linux touchpad; keep bare `0x03000000` only as leave-typing fallback
+  (`ITE8951_SCENARIO_ADDR` / `ite8951_scenario_satisfied` currently treats any non-KB GET as OK — may need to prefer `3`).

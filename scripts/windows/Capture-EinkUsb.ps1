@@ -10,9 +10,11 @@
 .PARAMETER Scenario
   A = coldboot idle (no prompts; use -IdleSeconds),
   B = keyboard, C = pen-mouse (default), D = roundtrip,
+  E = multitouch pen/touchpad (priority for ABS_MT leave-KB path),
   S = stop EinkSvr, capture, start EinkSvr (enable/init traffic),
   All = B then C then D.
   Prefer Capture-EinkColdboot.ps1 to arm A across a reboot.
+  Multitouch mission: docs/WINDOWS_MULTITOUCH_BRIEF.md.
 
 .PARAMETER OutDir
   Output directory for .pcap files and capture-notes.txt.
@@ -46,7 +48,7 @@
 #>
 [CmdletBinding()]
 param(
-	[ValidateSet('A', 'B', 'C', 'D', 'S', 'All')]
+	[ValidateSet('A', 'B', 'C', 'D', 'E', 'S', 'All')]
 	[string]$Scenario = 'C',
 
 	[string]$OutDir = '',
@@ -116,6 +118,21 @@ ACTION (C-penmouse) - PRIORITY:
 		Prompt = @'
 ACTION (D-roundtrip):
   Homebar: keyboard -> pen-mouse -> keyboard -> pen-mouse.
+  Press Enter here when finished.
+'@
+	}
+	'E' = @{
+		File   = 'E-multitouch-penmouse.pcap'
+		Title  = 'multitouch-penmouse'
+		Idle   = $false
+		ServiceRestart = $false
+		Prompt = @'
+ACTION (E-multitouch) - MULTITOUCH PRIORITY:
+  Need: no Notepad typing + TWO and THREE simultaneous contacts.
+  1. Open Notepad on the main LCD.
+  2. Homebar / scenario bar -> pen / touchpad / mouse (not keyboard).
+  3. Wait ~3s; touch 1 finger, then 2 together, then 3 together on E-Ink.
+  4. Confirm Notepad stays clean; note which HID device showed MT if possible.
   Press Enter here when finished.
 '@
 	}

@@ -145,7 +145,11 @@ timing as above. **Homebar taps stay manual** — the script prompts you.
 Run **elevated** PowerShell from the repo:
 
 ```powershell
-# Priority pen-mouse capture (elevated PowerShell)
+# Multitouch leave-KB path (PRIORITY when hunting ABS_MT / ≥2 contacts)
+# See docs/WINDOWS_MULTITOUCH_BRIEF.md
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Capture-EinkUsb.ps1 -Scenario E -Force
+
+# Priority pen-mouse leave-KB capture (scenario only; may be single-contact)
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Capture-EinkUsb.ps1 -Scenario C
 
 # EinkSvr restart = enable/init traffic (better than warm idle "A")

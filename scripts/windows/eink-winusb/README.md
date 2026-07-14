@@ -29,9 +29,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Set-EinkSvrAutostart.
 | `scenario-get` | `0xA6` GET — KB is byte1=`1` |
 | `scenario-set N` | try `<<24` / low / arg1 encodings |
 | `pen-mouse` | leave KB: optional `0xB3`+`0xA9`, then `0xA6` `0x03000000` |
+| `mt-replay` | replay E-multitouch early `0xB3`/`0xA9`/`0xA6 0x01030100` |
+| `fill [white\|black\|gray\|0xNN]` | full-panel LD_IMG (`0xA8`) + blit (`0x94`) |
+| `stripes` | 64px black/white bands (ghost check) |
+| `blit-test` | interactive white → black → stripes |
 
-Success: `scenario-get` ≠ `1` (usually `0`); E-Ink touch does not type into Notepad.
-Homebar UI will not appear (Lenovo userspace).
+### Multitouch mode + blit (what stays / goes)
+
+EinkSvr holds MI_00 while Homebar is up — stop it before WinUSB blits:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Test-MtBlit.ps1
+```
+
+That script: Homebar MT first → stop EinkSvr → `fill white` / `black` / `stripes` with pauses so you can note ghosts vs clears.
 
 ## If bulk I/O times out (121 / wait 258)
 

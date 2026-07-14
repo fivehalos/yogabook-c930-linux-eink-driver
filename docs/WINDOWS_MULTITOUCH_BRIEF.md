@@ -82,6 +82,14 @@ Repo helper still useful: `scripts/windows/eink-winusb/EinkWinUsb.exe` (`pen-mou
 
 ### Find the mode (try in order)
 
+Guided capture (elevated; EinkSvr must be Running / Homebar visible):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Capture-EinkUsb.ps1 -Scenario E -Force
+```
+
+Writes `win-captures/E-multitouch-penmouse.pcap`. Homebar + 1/2/3 finger stay manual.
+
 For each candidate mode: **Start capture → switch mode → wait 3 s → 1/2/3 finger on E-Ink → Stop.**  
 Write what you did in `capture-notes.txt`.
 
