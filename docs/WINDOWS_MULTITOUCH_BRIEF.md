@@ -1,159 +1,132 @@
-# Windows agent brief — find multitouch leave-KB path
+# Linux port brief — multitouch latch (GET=3 + HID 0x0c)
 
-**Carry this to the Windows RE session.**  
-Related: [WINDOWS_CAPTURE.md](WINDOWS_CAPTURE.md), [PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md).
+**Status: Windows validated Jul 2026.** This is no longer a hunt doc.
 
----
+**Full method for the Linux agent:** [LINUX_MT_STEPS.md](LINUX_MT_STEPS.md)  
+(use that file as the primary handoff — situation, cold vs armed MT, **fallback Homebar clone plan**, acceptance tests).
 
-## Context (Linux, Jul 2026)
+Wire detail: [PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md). Extracts: `win-captures/E-usbc-ops.txt`, `E-hid-0x85.txt`.
 
-We already have on Linux:
+**2026-07-13 correction:** cold `mt-enter` → GET=`3` + no KB, but **no `0x0c` MT** without Homebar-class arming. GET=`3` alone is not multitouch.
 
-| Working | Broken / incomplete |
-|---------|---------------------|
-| Leave firmware keyboard via `0xA6` SET addr `0x03000000` (GET byte1 → `0`) | True multi-finger input |
-| DRM compositor output on E-Ink | `eink-touchpad` uses HID report `0x90` — **single contact only** (`touch[1]` always) |
-| Relative pointer + tap clicks (soft heuristics) | Kernel ABS_MT digitizer (`event9`, 10 slots) advertised but **silent** under our draw touch route |
-
-### A/B on Linux (already done)
-
-1. **`touch_userspace_config=1`** (default): leave-KB + `0xAC`/`0xB3`/`SET_TP_AREA` `TOUCH_PEN=0x03` → HID `0x90` **live**, one point. ABS_MT **dead**.
-2. **`touch_userspace_config=0`**: leave-KB, **skip** that touch redirect → ABS_MT still **dead**, `0x90` also **dead**. Touch goes nowhere.
-
-**Conclusion:** Leave-KB alone is not enough. We need a **third** Windows path:
-firmware keyboard **off** + **multicontact digitizer** still reporting.
-
-Do **not** spend time re-proving leave-KB (`0x03000000`) unless it regresses. That is solved.
+If Linux “can’t replicate,” assume it is still on the **bare leave-KB / draw-routing** path below — not an **armed** Homebar MT session.
 
 ---
 
-## Mission
+## Two different non-keyboard modes (do not conflate)
 
-Find a Windows input mode where **all** of these hold:
+| Mode | How entered | `0xA6` GET byte1 | Touch HID | Owner blit |
+|------|-------------|------------------|-----------|------------|
+| **Bare leave-KB** | `0xA6` addr `0x03000000` (± optional B3/A9) | **`0`** | Single-contact **`0x90`** | Yes |
+| **MT / pen-mouse latch** | Homebar pen/touchpad → firmware latch | **`3`** | Multi-contact **`0x0c`** (EP interrupt / hidraw) | Yes |
 
-1. Touch on E-Ink does **not** type into Notepad (not scenario keyboard / GET ≠ `1`).
-2. Digitzer reports **≥2 simultaneous contacts** (2- and 3-finger chord).
-3. Capture the USB opcode sequence (`0xA6` / `0xB3` / `0xAF` / related) that entered that mode.
+Linux today mostly achieves row 1 (`touch_userspace_config=1` → leave + `0xAC`/`0xB3`/`0xAF TOUCH_PEN=0x03`). That is **solved leave-typing**, not multitouch.
 
-That recipe becomes the Linux `eink_drm` touch routing for NKRO keyboard + real touchpad.
-
----
-
-## Hardware / tools
-
-- YogaBook C930 dual-boot Windows (not a VM).
-- Device `048d:8951`.
-- Wireshark + USBPcap; optional `protocol.lua` from the repo.
-- Notepad on LCD (phantom-key test).
-- A way to see multitouch contacts, e.g.:
-  - Microsoft “Paint” / any touch app that shows multi-finger, or
-  - HID / digitizer inspector, or
-  - Device Manager → find active HID digitizer / touchpad under the ITE composite while testing.
-
-Repo helper still useful: `scripts/windows/eink-winusb/EinkWinUsb.exe` (`pen-mouse`, `scenario-get`).
+**Success on Linux = GET byte1 stays `3` and hidraw streams report `0x0c` with contact count ≥2.**  
+GET=`0` + live `0x90` is a **fail** for this mission (even if soft-chords work).
 
 ---
 
-## Success criteria (strict)
+## What Windows proved (do not over-claim)
+
+1. Homebar → pen/touchpad/mouse → **real 1/2/3 contacts** on report **`0x0c`** (`E-hid-0x85.txt`).
+2. In that armed mode, GET byte1 is **`3`**.
+3. After arming: owner blit with EinkSvr stopped works (sharp `stripes`).
+4. Cold `mt-enter` (no Homebar) → GET=`3`, KB off, **`0x0c` not observed** — scenario leave ≠ digitizer arm.
+5. Fallback product path: clone EinkSvr/Homebar bring-up → user MT → our blit + `0x0c`→uinput ([LINUX_MT_STEPS.md](LINUX_MT_STEPS.md) §4).
+
+Parallel **`0x90`** can still appear; **MT is `0x0c`**, not ABS_MT under the draw route.
+
+---
+
+## Why Linux replication usually fails
+
+Common mistakes:
+
+1. **Treat any GET≠1 as success** — code accepts GET=`0` as “pen-mouse done.” That is bare leave, not MT.
+2. **Send leave addr `0x03000000` only** — yields GET=`0`, never Homebar latch.
+3. **After (or instead of) MT entry, run `ite8951_detach_keyboard_input()`** — `0xAC` + payload-`0xB3` + **`0xAF TOUCH_PEN=0x03`** re-routes touch to **single-point `0x90`**. Windows E **early** mode entry did **not** use that `0xAF` slot pattern; it used CDB-inline `0xB3`, `0xA9`, **`0xA6 0x01030100`**, then `0xAE`/`0xAC`, display_cfg, blits.
+4. **Expect kernel ABS_MT (`event9`) to wake up** under the draw route — on Windows MT was vendor HID `0x0c`, not our silent digitizer node.
+5. **Replay only `mt-replay` from cold keyboard without checking GET=`3` + live `0x0c`** — isolating the minimal cold subset is still open; Homebar may do more than the early USBC snippet before MT is armed.
+
+Also note Windows B3 in E is often **CDB args only** (resp length 6), while Linux `set_dynamic_bool_values` sends a **struct payload**. Different encoding.
+
+---
+
+## Recipe to port (target)
+
+### A. Enter / hold MT latch (priority)
+
+From `E-usbc-ops.txt` ops 1–20 (before A8 blit storm), condensed:
+
+```
+0xB3  CDB args 0101 / 0003 / 0301      (expect short IN)
+0xA9  arg1=0x0200
+0xA6  address = 0x01030100             (NOT 0x03000000)
+… reg reads 18001224 / 18001138 …
+0x84  display_cfg write (as in E)
+0xAE  arg1=0x0100
+0xAC  (handwr clear)
+0xB3  CDB args 0100 / 0003 / 0301
+0xA9  0x0200
+0xA6  address = 0x01030100             (again)
+0xB3  CDB args 0100 / 0003 / 0201
+0x80  GET_SYS / doorknock as in E
+… display_cfg …
+0xA6  GET address 0  → expect byte1 == 3
+```
+
+WinUSB helpers (Windows dual-boot only): `scenario-get`, `mt-replay`  
+(`scripts/windows/eink-winusb/`).
+
+**Do not** call the current `TOUCH_PEN` full-screen TP-area path after this if the goal is `0x0c`.
+
+### B. Display
+
+Keep existing DRM `0xA8`/`0x94` at `0x00382f30`. Validated with GET=`3`.
+
+### C. Userspace input
+
+- Prefer hidraw that advertises **report `0x0c`** when it is streaming (`eink-touchpad` already has a parser sketch).
+- Layout (from Windows): `[0]=0x0c`, `[1]=pad`, `[2]=contact count`, then contacts tagged `05` + id + coords… (see `E-hid-0x85.txt` / `touch_parse.c`).
+- Keep `0x90` path only as fallback — not the MT success path.
+
+---
+
+## Linux acceptance tests
 
 | Check | Pass |
 |-------|------|
-| Notepad while touching E-Ink | **No** characters |
-| `scenario-get` / `0xA6` GET byte1 | **≠ 1** (expect `0` after leave-KB) |
-| 1 finger | Contact visible |
-| 2 fingers down together | **Two** contacts / slots / tracking IDs |
-| 3 fingers | **Three** contacts |
-| Capture | USB pcap covering mode entry + the 1/2/3 finger sequence |
+| After input bring-up, `0xA6` GET byte1 | **`3`** (not `0`, not `1`) |
+| `hidraw` / sniff | Report **`0x0c`**, count byte ≥ **2** with two fingers |
+| Three fingers | count ≥ **3** |
+| DRM frame | Still updates (owner blit) |
+| Not firmware KB | No phantom typing into a focused text field |
 
-**Fail** if only one contact ever appears (that is the same class as Linux `0x90`).  
-**Fail** if Notepad types (firmware keyboard).  
-**Fail** if leave-KB works but touch is completely dead (same as Linux `touch_userspace_config=0`).
+**Fail:** GET=`0`/`≠1` with only `0x90`.  
+**Fail:** GET=`3` but `0x0c` silent because `0xAF TOUCH_PEN` / payload-B3 draw routing ran afterward.  
+**Fail:** Using soft multi-touch on `0x90` as “replication.”
 
----
+### Debug order when stuck
 
-## Procedure
-
-### Prep
-
-1. Disable Fast Startup.
-2. Install Lenovo E-Ink stack so Homebar / EinkSvr exist (or use WinUSB tool if you already know leave-KB).
-3. Open Notepad on the **LCD**.
-4. Start USBPcap with filter: `usb.idVendor == 0x048d && usb.idProduct == 0x8951`.
-
-### Find the mode (try in order)
-
-Guided capture (elevated; EinkSvr must be Running / Homebar visible):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Capture-EinkUsb.ps1 -Scenario E -Force
-```
-
-Writes `win-captures/E-multitouch-penmouse.pcap`. Homebar + 1/2/3 finger stay manual.
-
-For each candidate mode: **Start capture → switch mode → wait 3 s → 1/2/3 finger on E-Ink → Stop.**  
-Write what you did in `capture-notes.txt`.
-
-| # | Candidate | How | Likely result (hypothesis) |
-|---|-----------|-----|----------------------------|
-| A | Homebar **pen / touchpad / mouse** | UI toggle | Best guess for multicontact + no Notepad |
-| B | `EinkWinUsb.exe pen-mouse` only | No Homebar | Leave-KB; may or may not feed MT |
-| C | Same as A/B then use Reader / ink / draw | Extra `0xB3`/`0xAF` | May collapse to single-point `0x90`-style |
-| D | Homebar **keyboard** | Control | Multicontact as keys — **reject** for this mission |
-
-Focus on **A**. If A shows real 2/3 finger contacts and no Notepad → **that is the file we need.**
-
-Suggested filenames:
-
-- `E-multitouch-penmouse.pcapng` — Homebar pen/touchpad + 1/2/3 finger (priority)
-- `E-notes.txt` — scenario GET, Nest/Homebar state, which HID device showed MT
-- `F-ink-or-draw.pcapng` — if you enter ink/draw after leave-KB, note if MT collapses to 1 contact
-
-### Parallel observations (not USB)
-
-While 2/3 fingers are down, note:
-
-- Device Manager / HID: **which interface** is producing the multitouch (touchpad vs digitizer vs mouse).
-- Contact count UI or inspector: slots = ?
-
-Linux will map that to `event8` (touchpad) / `event9` (direct digitizer) / or a hidraw report ID other than single-point `0x90`.
+1. Log GET scenario **before and after** every leave / detach / reassert.
+2. Confirm which hidraw has `0x0c` in the descriptor **and** whether `read()` returns any `0x0c` reports.
+3. Temporarily **disable** `touch_userspace_config` / `ite8951_reapply_draw_input` / `reassert_draw_scenario` after a manual MT entry and retest `0x0c`.
+4. Diff kernel CDB for `0xA6`/`0xB3` against `E-usbc-ops.txt` (address `0x01030100`, B3 arg triples).
 
 ---
 
-## What to extract for Linux (hand back)
+## Open (Windows→Linux)
 
-From the **passing** capture, list every bulk OUT that differs from cold keyboard, especially:
-
-| Opcode | Why |
-|--------|-----|
-| `0xA6` SCENARIO | Address + GET byte1 after |
-| `0xB3` DYNAMICSETTING | Full payload / CDB-inline args (`uc_bypass_flag`, `uc_pen_mouse_flag`, …) |
-| `0xAF` SET_TP_AREA | Rectangles + **flag** bytes (not only `0x03` TOUCH_PEN / `0x00` NO_REPORT) |
-| `0xAC` handwriting | If present |
-| Anything else on mode switch | Don’t drop unknown OUT |
-
-Also answer explicitly:
-
-1. Does this mode use classic **ABS_MT / Windows digitizer**, or a vendor HID report with contact count > 1?
-2. Does entering “draw / ink / reader” later **kill** multitouch (collapse to 1 point)? Timestamp that transition if so.
-3. Can we keep **display updates** under Linux ownership while staying in the multitouch leave-KB mode? (If Windows can’t draw and Linux can’t, note that — we may need dual routing.)
+- Minimal cold subset that latches GET=`3` + live `0x0c` **without** Homebar (may need more than `mt-replay`).
+- Meaning of `0xAE`; exact `0xB3` CDB field map.
+- Clean re-enter keyboard from GET=`3`.
 
 ---
 
-## Do not optimize for
+## Do not
 
-- Re-validating `0x03000000` leave-KB alone (done).
-- Soft multi-touch heuristics on single-point `0x90` (Linux hack only; not for NKRO keyboard).
-- Firmware keyboard zone typing as a “multitouch” solution.
-
----
-
-## Return checklist for the Linux agent
-
-- [ ] `E-multitouch-penmouse.pcapng` (or equivalent) attached / copied to `win-captures/`
-- [ ] Notes: GET scenario, Homebar mode name, Notepad = clean
-- [ ] Confirmed **2+** and **3** contacts observed
-- [ ] Which Windows device / HID path carried MT
-- [ ] Diff summary: `0xA6` / `0xB3` / `0xAF` (+ others) vs keyboard / vs ink
-- [ ] Whether ink/draw collapses MT to one contact
-
-When that lands, Linux work is: port that routing into `ite8951_detach_keyboard_input()` / draw-input path so ABS_MT (or multi-contact HID) stays alive with DRM, then drive `eink-touchpad` / `einkd` from real contacts — not `0x90` clustering.
+- Re-validate bare `0x03000000` leave-KB as the MT solution.
+- Treat GET=`0` as pen-mouse MT success.
+- Route MT mode through `SET_TP_AREA` `TOUCH_PEN=0x03` “to enable HID.”
+- Spend time on soft `0x90` clustering instead of live `0x0c`.

@@ -146,6 +146,7 @@ internal static class Native
 internal sealed class IteDevice : IDisposable
 {
 	public const byte OpGetSys = 0x80;
+	public const byte OpReadMem = 0x81; /* E MT entry short read */
 	public const byte OpReadReg = 0x83;
 	public const byte OpWriteReg = 0x84;
 	public const byte OpDpyArea = 0x94;
@@ -153,6 +154,7 @@ internal sealed class IteDevice : IDisposable
 	public const byte OpLdImg = 0xA8;
 	public const byte OpSetWaveform = 0xA9;
 	public const byte OpSetHandwr = 0xAC;
+	public const byte OpAe = 0xAE; /* E MT entry; meaning open */
 	public const byte OpSetTpArea = 0xAF;
 	public const byte OpGetDpyStatus = 0xB1;
 	public const byte OpDynamic = 0xB3;
@@ -699,14 +701,143 @@ internal sealed class IteDevice : IDisposable
 	}
 
 	/*
-	 * Windows packs 0xB3 into CDB args (no OUT payload) — see C-penmouse.pcap.
-	 * Pen-ish:  arg1=0x0100 arg2=0x0103 arg3=0x0301
-	 * Other:    arg1=0x0101 arg2=0x0003 arg3=0x0301
+	 * Windows packs 0xB3 into CDB args. E-multitouch: expect IN len 6 (flags 0x80).
+	 * Older pen-mouse used no-IN; prefer expectIn=true for MT entry.
 	 */
 	public void DynamicCdb(ushort arg1, ushort arg2, ushort arg3, ushort arg4)
 	{
-		byte[] ctrl = BuildCtrl(false, 0, OpDynamic, 0, arg1, arg2, arg3, arg4);
-		Exchange(ctrl, 0, "DYNAMIC_CDB");
+		DynamicCdb(arg1, arg2, arg3, arg4, true);
+	}
+
+	public void DynamicCdb(ushort arg1, ushort arg2, ushort arg3, ushort arg4, bool expectIn)
+	{
+		if (expectIn)
+		{
+			byte[] ctrl = BuildCtrl(true, 6, OpDynamic, 0, arg1, arg2, arg3, arg4);
+			byte[] resp = Exchange(ctrl, 6, "DYNAMIC_CDB");
+			Console.WriteLine("  B3 {0:X4}/{1:X4}/{2:X4} rsp: {3}",
+				arg1, arg2, arg3, BitConverter.ToString(resp, 0, Math.Min(resp.Length, 8)));
+		}
+		else
+		{
+			byte[] ctrl = BuildCtrl(false, 0, OpDynamic, 0, arg1, arg2, arg3, arg4);
+			Exchange(ctrl, 0, "DYNAMIC_CDB");
+		}
+	}
+
+	public byte[] ReadReg(uint reg)
+	{
+		byte[] ctrl = BuildCtrl(true, 4, OpReadReg, reg, 4, 0, 0, 0);
+		byte[] resp = Exchange(ctrl, 4, "READ_REG");
+		Console.WriteLine("  R 0x{0:X8} => {1}", reg, BitConverter.ToString(resp));
+		return resp;
+	}
+
+	public void WriteReg(uint reg, byte[] be4)
+	{
+		if (be4 == null || be4.Length < 4)
+			throw new ArgumentException("need 4 BE bytes");
+		byte[] ctrl = BuildCtrl(false, 4, OpWriteReg, reg, 4, 0, 0, 0);
+		ExchangeOutPayload(ctrl, be4, "WRITE_REG");
+		Console.WriteLine("  W 0x{0:X8} <= {1}", reg, BitConverter.ToString(be4, 0, 4));
+	}
+
+	public void CmdExpect(byte op, uint addr, ushort a1, ushort a2, ushort a3, ushort a4,
+		int inLen, string tag)
+	{
+		byte[] ctrl = BuildCtrl(inLen > 0, (uint)Math.Max(inLen, 0), op, addr, a1, a2, a3, a4);
+		if (inLen > 0)
+		{
+			byte[] resp = Exchange(ctrl, inLen, tag);
+			Console.WriteLine("  {0} op=0x{1:X2} rsp: {2}", tag, op,
+				BitConverter.ToString(resp, 0, Math.Min(resp.Length, 16)));
+		}
+		else
+			Exchange(ctrl, 0, tag);
+	}
+
+	/*
+	 * Full E-multitouch early sequence (ops 1-20) from cold KB — no Homebar.
+	 * Goal: GET byte1 == 3. Then user must confirm 2/3 finger (HID 0x0c).
+	 */
+	public byte MtEnterCold()
+	{
+		Console.WriteLine("=== mt-enter from cold (E-usbc-ops 1..20, no A8 blit) ===");
+		byte before = ScenarioGet();
+		Console.WriteLine("before scenario={0} (want start at 1=KB for clean test)", before);
+
+		try { CmdExpect(OpReadMem, 0x00000080u, 0x0010, 0, 0, 0, 16, "81a"); }
+		catch (Exception ex) { Console.WriteLine("  warn 81a: " + ex.Message); }
+
+		try { DynamicCdb(0x0101, 0x0003, 0x0301, 0, true); }
+		catch (Exception ex) { Console.WriteLine("  warn B3: " + ex.Message); }
+		try { SetWaveform(0x200); } catch (Exception ex) { Console.WriteLine("  warn A9: " + ex.Message); }
+		{
+			byte[] ctrl = BuildCtrl(true, 4, OpScenario, 0x01030100u, 0, 0, 0, 0);
+			byte[] resp = Exchange(ctrl, 4, "A6_MT1");
+			Console.WriteLine("  A6 0x01030100 rsp: {0}", BitConverter.ToString(resp, 0, Math.Min(4, resp.Length)));
+		}
+
+		byte[] cfg = null;
+		try { cfg = ReadReg(0x18001224u); } catch (Exception ex) { Console.WriteLine("  warn: " + ex.Message); }
+		try { cfg = ReadReg(0x18001138u); } catch (Exception ex) { Console.WriteLine("  warn: " + ex.Message); }
+		if (cfg != null && cfg.Length >= 4)
+		{
+			try { WriteReg(0x18001138u, cfg); }
+			catch (Exception ex) { Console.WriteLine("  warn W cfg: " + ex.Message); }
+		}
+
+		try { CmdExpect(OpAe, 0, 0x0100, 0, 0, 0, 1, "AE"); }
+		catch (Exception ex) { Console.WriteLine("  warn AE: " + ex.Message); }
+		try { CmdExpect(OpSetHandwr, 0, 0, 0, 0, 0, 8, "AC"); }
+		catch (Exception ex) { Console.WriteLine("  warn AC: " + ex.Message); }
+
+		try { CmdExpect(OpReadMem, 0x00000080u, 0x0010, 0, 0, 0, 16, "81b"); }
+		catch (Exception ex) { Console.WriteLine("  warn 81b: " + ex.Message); }
+
+		try { DynamicCdb(0x0100, 0x0003, 0x0301, 0, true); }
+		catch (Exception ex) { Console.WriteLine("  warn B3: " + ex.Message); }
+		try { SetWaveform(0x200); } catch (Exception ex) { Console.WriteLine("  warn A9: " + ex.Message); }
+		{
+			byte[] ctrl = BuildCtrl(true, 4, OpScenario, 0x01030100u, 0, 0, 0, 0);
+			byte[] resp = Exchange(ctrl, 4, "A6_MT2");
+			Console.WriteLine("  A6 0x01030100 rsp: {0}", BitConverter.ToString(resp, 0, Math.Min(4, resp.Length)));
+		}
+
+		try { CmdExpect(OpReadMem, 0x00000080u, 0x0010, 0, 0, 0, 16, "81c"); }
+		catch (Exception ex) { Console.WriteLine("  warn 81c: " + ex.Message); }
+
+		try { DynamicCdb(0x0100, 0x0003, 0x0201, 0, true); }
+		catch (Exception ex) { Console.WriteLine("  warn B3: " + ex.Message); }
+
+		try
+		{
+			byte[] ctrl = BuildCtrl(true, 112, OpGetSys, 0x38393531u, 1, 2, 0, 0);
+			byte[] resp = Exchange(ctrl, 112, "GET_SYS");
+			Console.WriteLine("  GET_SYS {0} B head: {1}", resp.Length,
+				BitConverter.ToString(resp, 0, Math.Min(16, resp.Length)));
+		}
+		catch (Exception ex) { Console.WriteLine("  warn GET_SYS: " + ex.Message); }
+
+		try { ReadReg(0x18001224u); } catch (Exception ex) { Console.WriteLine("  warn: " + ex.Message); }
+		try { cfg = ReadReg(0x18001138u); } catch (Exception ex) { Console.WriteLine("  warn: " + ex.Message); }
+		if (cfg != null && cfg.Length >= 4)
+		{
+			try { WriteReg(0x18001138u, cfg); }
+			catch (Exception ex) { Console.WriteLine("  warn W cfg: " + ex.Message); }
+		}
+
+		byte after = ScenarioGet();
+		Console.WriteLine("=== after mt-enter: scenario={0} (WANT 3) ===", after);
+		if (after == ScenarioPenMouse)
+			Console.WriteLine("PASS GET=3. Now confirm 2/3 finger on E-Ink (Notepad LCD must stay clean).");
+		else if (after == ScenarioNormal)
+			Console.WriteLine("GOT GET=0 — bare leave class, NOT MT latch. Touch likely 0x90 only.");
+		else if (after == ScenarioKeyboard)
+			Console.WriteLine("STILL KB GET=1 — sequence did not leave keyboard.");
+		else
+			Console.WriteLine("Unexpected GET={0}", after);
+		return after;
 	}
 
 	public bool TrySetScenario(byte want)
@@ -853,6 +984,11 @@ internal static class Program
 					case "mt-replay":
 						dev.MtModeReplay();
 						break;
+					case "mt-enter":
+					{
+						byte s = dev.MtEnterCold();
+						return s == IteDevice.ScenarioPenMouse ? 0 : 2;
+					}
 					case "fill":
 					{
 						byte gray = 0xff;
@@ -910,7 +1046,8 @@ internal static class Program
 		Console.WriteLine("  EinkWinUsb.exe scenario-get");
 		Console.WriteLine("  EinkWinUsb.exe scenario-set <0|1|3>");
 		Console.WriteLine("  EinkWinUsb.exe pen-mouse");
-		Console.WriteLine("  EinkWinUsb.exe mt-replay     # E-capture A6/B3 path");
+		Console.WriteLine("  EinkWinUsb.exe mt-replay     # short E A6/B3 subset");
+		Console.WriteLine("  EinkWinUsb.exe mt-enter      # full E ops 1-20 from cold KB");
 		Console.WriteLine("  EinkWinUsb.exe fill [white|black|gray|0xNN]");
 		Console.WriteLine("  EinkWinUsb.exe stripes");
 		Console.WriteLine("  EinkWinUsb.exe blit-test     # white → black → stripes");

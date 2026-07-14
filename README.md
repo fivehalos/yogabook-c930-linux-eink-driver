@@ -27,7 +27,8 @@ Implementation policy: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | [**Coding style**](docs/CODING_STYLE.md) | C throughout — kernel + userspace readability standards |
 | [**Architecture & policy**](docs/ARCHITECTURE.md) | Layers, reference-only rule, retired patterns |
 | [**Blueprint & roadmap**](docs/BLUEPRINT.md) | Progress log, lessons learned, **agent handoff** |
-| [**Windows protocol**](docs/PROTOCOL_WINDOWS.md) | Validated leave-KB / `0xA6` wire notes |
+| [**Windows protocol**](docs/PROTOCOL_WINDOWS.md) | Validated leave-KB / MT latch (`GET=0` vs `GET=3`) wire notes |
+| [**Linux MT steps**](docs/LINUX_MT_STEPS.md) | Full multitouch port method for Linux agent |
 | [**Windows USB capture**](docs/WINDOWS_CAPTURE.md) | Dual-boot RE session — capture checklist |
 | [Reference fetch guide](reference/README.md) | Download archives for hardware documentation |
 

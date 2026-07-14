@@ -82,13 +82,18 @@ Replay: `scripts/windows/eink-winusb/EinkWinUsb.exe pen-mouse`
 
 ## Multitouch latch + owner blit (validated Jul 2026)
 
-1. Homebar → pen/touchpad (MT); confirm ≥2 contacts.
-2. Stop EinkSvr hard (`Stop-Service` + kill `EInk*`) so WinUSB can open MI_00.
-3. `scenario-get` → **byte1=`3`** while still MT (`E-multitouch-penmouse.pcap` path).
-4. Owner `fill white` / `fill black` / `stripes` (`0xA8` + `0x94` at `0x00382f30`) — **sharp stripes**; no firmware/Homebar blit required.
-5. Optional: `EinkWinUsb.exe mt-replay` (E early `0xB3`/`0xA9`/`0xA6 0x01030100`); GET stays `3`.
+**Armed path (works):**
 
-Linux implication: treat GET=`3` as the MT/pen-mouse success target, not only “≠1”. Bare leave that yields GET=`0` is a different input path.
+1. Homebar → pen/touchpad (MT); confirm ≥2 contacts on HID **`0x0c`**.
+2. Stop EinkSvr hard so WinUSB can open MI_00.
+3. `scenario-get` → **byte1=`3`**; owner `fill` / `stripes` at `0x00382f30` — sharp; no Lenovo paint required.
+
+**Cold path (incomplete):**
+
+- Fresh boot, no EinkSvr: `EinkWinUsb.exe mt-enter` (E ops 1–20) → GET=`3`, KB off, but **no observed `0x0c` / MT traces**.
+- So GET=`3` ≠ digitizer armed. Extra Homebar/EinkSvr enable still required for live multitouch.
+
+**Linux handoff:** [LINUX_MT_STEPS.md](LINUX_MT_STEPS.md) — prefer isolating cold arming; **fallback** = clone EinkSvr/Homebar bring-up → user MT → our blit + `0x0c`→uinput.
 
 ---
 
@@ -103,10 +108,10 @@ Linux implication: treat GET=`3` as the MT/pen-mouse success target, not only �
 | `0xA9` | Waveform (`0x0200` on mode transitions) |
 | `0x83`/`0x84` | Read/write regs (`0x18001224` panel mode, `0x18001138` display_cfg) |
 | `0x80` | GET_SYS doorknock |
-| `0xA8`/`0x94` | LD_IMG / DPY blit — owner path works with GET=`3` and EinkSvr stopped |
+| `0xA8`/`0x94` | LD_IMG / DPY blit — owner path works after Homebar-armed GET=`3` |
 
 Full Homebar blit / cold enable (`S-einksvr-restart.pcap`) is separate from
-leave-KB / MT latch.
+leave-KB; likely part of **arming** `0x0c`.
 
 ---
 
@@ -114,6 +119,6 @@ leave-KB / MT latch.
 
 - Reliable **re-enter keyboard** from scenario `0` or `3` without EinkSvr
 - Exact `0xB3` / `0xAF` / `0xAE` field map vs Lenovo structs
-- Minimal subset that latches GET=`3` + HID `0x0c` without Homebar (isolate vs full E sequence)
-- Port: prefer Homebar MT entry (GET=`3`) for Linux touchpad; keep bare `0x03000000` only as leave-typing fallback
-  (`ITE8951_SCENARIO_ADDR` / `ite8951_scenario_satisfied` currently treats any non-KB GET as OK — may need to prefer `3`).
+- **What beyond E ops 1–20 arms HID `0x0c`** (S-enable? Homebar click delta?)
+- Does `0x0c` still stream after EinkSvr stop if Homebar armed MT first? (re-confirm on next Windows session)
+- Fallback: minimal EinkSvr/Homebar clone for bring-up + user MT, then Linux blit/uinput
