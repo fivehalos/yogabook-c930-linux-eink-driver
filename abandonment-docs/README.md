@@ -98,6 +98,7 @@ panel.
 | `docs/SYSTEM_SPEC.md` | Technical system specification |
 | `docs/ARCHITECTURE.md` | Implementation structure and ownership rules |
 | `docs/LINUX_MT_STEPS.md` | Linux multitouch port and validation procedure |
+| `docs/PROTOCOL_WINDOWS.md` | Windows-validated coordinator protocol reference |
 | `docs/WINDOWS_CAPTURE.md` | Windows reverse-engineering capture method |
 | `kernel/README.md` | Kernel driver implementation reference |
 
