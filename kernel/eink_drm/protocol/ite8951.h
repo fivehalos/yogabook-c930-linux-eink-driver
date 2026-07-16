@@ -14,6 +14,7 @@ struct urb;
 struct usb_device;
 
 #define ITE8951_USB_OP_GET_SYS		0x80
+#define ITE8951_USB_OP_READ_MEM		0x81	/* E MT entry short read @0x80 */
 #define ITE8951_USB_OP_READ_REG		0x83
 #define ITE8951_USB_OP_WRITE_REG	0x84
 #define ITE8951_USB_OP_DPY_AREA		0x94
@@ -21,6 +22,8 @@ struct usb_device;
 #define ITE8951_USB_OP_LD_IMG_AREA2	0xA8
 #define ITE8951_USB_OP_SET_WAVEFORM	0xA9
 #define ITE8951_USB_OP_SET_HANDWR_REGION	0xAC
+/* E-capture MT entry (arg1=0x0100); field map still open — see PROTOCOL_WINDOWS.md */
+#define ITE8951_USB_OP_AE		0xAE
 #define ITE8951_USB_OP_SET_TP_AREA	0xAF
 #define ITE8951_USB_OP_DYNAMICSETTING	0xB3
 #define ITE8951_USB_OP_GET_DPY_STATUS	0xB1
@@ -35,6 +38,11 @@ struct usb_device;
 #define ITE8951_DEFAULT_IMAGE_BUF	0x00382f30u
 #define ITE8951_REG_PANEL_MODE		0x18001224u
 #define ITE8951_REG_DISPLAY_CFG		0x18001138u
+/* Linux owner-draw latch (pre-MT); Windows cold arm often leaves 0x00200000. */
+#define ITE8951_DISPLAY_CFG_DRAW	0x002e0000u
+/* Finger MT enable — OR into display_cfg (NOT 0x800 → wire 00-20-08-00). */
+#define ITE8951_DISPLAY_CFG_FINGER_BIT	0x00080000u
+#define ITE8951_DISPLAY_CFG_MISTAKE_BIT	0x00000800u
 #define ITE8951_REG_PANEL_MODE_READY	0x80000000u
 #define ITE8951_DPY_STATUS_BYTES	136
 #define ITE8951_WAVEFORM_CURRENT	0xffu
@@ -52,6 +60,8 @@ struct usb_device;
 #define ITE8951_SCENARIO_PEN_MOUSE	3u	/* GI_SCENARIO_PEN_MOUSE */
 #define ITE8951_SCENARIO_ADDR(s)	((u32)(s) << 24)
 #define ITE8951_SCENARIO_LEAVE_KB_ADDR	ITE8951_SCENARIO_ADDR(ITE8951_SCENARIO_PEN_MOUSE)
+/* Homebar / E-capture MT latch — not the same as bare leave 0x03000000 */
+#define ITE8951_SCENARIO_MT_LATCH_ADDR	0x01030100u
 
 /* 2019 reference internal transition DWORDs (usercmd_enable_kb / enable_draw). */
 #define ITE8951_SCENARIO_REF_KB_EXIT	0x00040000u
@@ -106,6 +116,11 @@ struct ite8951_usb {
 	u32 panel_width;
 	u32 panel_height;
 	bool draw_mode_active;
+	u8 last_scenario;
+	u8 mt_latch_before;
+	u8 mt_latch_after;
+	bool mt_latch_ran;
+	bool mt_finger_armed;	/* display_cfg has FINGER_BIT after mt-arm */
 };
 
 int ite8951_usb_setup(struct ite8951_usb *link);
@@ -123,6 +138,8 @@ int ite8951_wait_display_ready(struct ite8951_usb *link, unsigned int timeout_ms
 int ite8951_enter_draw_mode(struct ite8951_usb *link);
 int ite8951_assert_draw_scenario(struct ite8951_usb *link);
 int ite8951_reapply_draw_input(struct ite8951_usb *link);
+int ite8951_get_scenario(struct ite8951_usb *link, u8 *scenario);
+int ite8951_mt_mode_replay(struct ite8951_usb *link);
 int ite8951_load_pixels(struct ite8951_usb *link, u32 buf_offset,
 			const struct ite8951_rect *region,
 			const u8 *pixels, size_t length);

@@ -4,7 +4,10 @@
 
 #include "hid_touch.h"
 
+#include "../common/eink_touch.h"
 #include "../common/eink_panel.h"
+
+#include <linux/hidraw.h>
 
 #include <dirent.h>
 #include <errno.h>
@@ -14,13 +17,11 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <linux/hidraw.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 
 #define EINK_TOUCH_REPORT_ID	0x90
 #define EINK_PEN_REPORT_ID	0x91
-#define EINK_MT_REPORT_ID	0x0c
 
 static int hid_read_unsigned(const char *path, unsigned int *value)
 {
@@ -134,9 +135,55 @@ static int hid_fill_candidate(const char *hidraw_name,
 	candidate->has_pen_report =
 		hid_report_has_id(sysfs_dir, EINK_PEN_REPORT_ID);
 	candidate->has_mt_report =
-		hid_report_has_id(sysfs_dir, EINK_MT_REPORT_ID);
+		hid_report_has_id(sysfs_dir, EINK_MT_REPORT_ID) ||
+		hid_report_has_id(sysfs_dir, EINK_MT_REPORT_ID_LINUX);
 
 	return 0;
+}
+
+int hid_touch_path_is_mt(const char *hidraw_path)
+{
+	char sysfs_dir[256];
+	const char *name;
+
+	if (!hidraw_path)
+		return 0;
+
+	name = strrchr(hidraw_path, '/');
+	if (!name)
+		name = hidraw_path;
+	else
+		name++;
+
+	snprintf(sysfs_dir, sizeof(sysfs_dir), "/sys/class/hidraw/%s", name);
+	if (!hid_path_matches_yogabook(sysfs_dir))
+		return 0;
+
+	if (hid_report_has_id(sysfs_dir, EINK_MT_REPORT_ID) ||
+	    hid_report_has_id(sysfs_dir, EINK_MT_REPORT_ID_LINUX))
+		return 1;
+
+	/* Digitizer iface streams 0x03 even when descriptor only lists 0x0c. */
+	{
+		char iface_path[512];
+		unsigned int iface = 99;
+
+		snprintf(iface_path, sizeof(iface_path),
+			 "%s/device/../bInterfaceNumber", sysfs_dir);
+		if (hid_read_unsigned(iface_path, &iface) == 0 && iface == 3)
+			return 1;
+	}
+
+	return 0;
+}
+
+static int hidraw_index_from_path(const char *path)
+{
+	const char *name = strrchr(path, 'w');
+
+	if (!name)
+		return 9999;
+	return atoi(name + 1);
 }
 
 static int hid_touch_score_candidate(const struct eink_hid_candidate *candidate)
@@ -147,20 +194,19 @@ static int hid_touch_score_candidate(const struct eink_hid_candidate *candidate)
 		return -1;
 
 	/*
-	 * Prefer live single-contact 0x90. HID 0x0c is present in the descriptor
-	 * after GET=3 but cold Linux still does not stream it (PenMouse arm open).
-	 * Use --hid /dev/hidrawN when 0x0c is proven live.
+	 * Prefer HID 0x0c after cold mt-arm (GET=3 + finger bit). Fall back to
+	 * single-contact 0x90 when MT is not streaming.
 	 */
-	if (candidate->has_touch_report)
-		score += 200;
 	if (candidate->has_mt_report)
+		score += 200;
+	if (candidate->has_touch_report)
 		score += 50;
 	if (candidate->has_pen_report)
 		score += 10;
 
-	if (candidate->has_touch_report && candidate->iface == 1)
+	if (candidate->has_mt_report && candidate->iface == 3)
 		score += 20;
-	else if (candidate->has_mt_report && candidate->iface == 3)
+	else if (candidate->has_touch_report && candidate->iface == 1)
 		score += 5;
 
 	return score;
@@ -194,7 +240,10 @@ static int hid_touch_pick_candidate(struct eink_hid_candidate *best_out)
 		if (score < 0)
 			continue;
 
-		if (!found || score > best_score) {
+		if (!found || score > best_score ||
+		    (score == best_score &&
+		     hidraw_index_from_path(candidate.path) <
+		     hidraw_index_from_path(best.path))) {
 			best = candidate;
 			best_score = score;
 			found = 1;
@@ -236,7 +285,7 @@ int hid_touch_list_candidates(void)
 		any = 1;
 		score = hid_touch_score_candidate(&candidate);
 
-		printf("  %s  iface=%d proto=%d mt0x0c=%s touch0x90=%s pen0x91=%s score=%d%s\n",
+		printf("  %s  iface=%d proto=%d mt=%s touch0x90=%s pen0x91=%s score=%d%s\n",
 		       candidate.path,
 		       candidate.iface,
 		       candidate.protocol,
@@ -299,6 +348,8 @@ int hid_touch_open(struct eink_hid_touch *hid, const char *path_override,
 			fprintf(stderr,
 				"warning: HIDIOCREVOKE failed on %s: %s\n",
 				path, strerror(errno));
+			fprintf(stderr,
+				"  kernel hid-multitouch may starve hidraw reads\n");
 		} else {
 			fprintf(stderr, "exclusive HID grab enabled on %s\n",
 				path);

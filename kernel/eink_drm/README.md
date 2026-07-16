@@ -52,6 +52,23 @@ YogaBook E-Ink panel USB link ready
 panel init complete (4 doorknocks)
 ```
 
+## Multitouch arm probe (cold `mt-arm`)
+
+Runs Windows-validated cold **mt-arm** (E ops 1–20 + `display_cfg |= 0x00080000`) without unloading DRM:
+
+```bash
+sudo ./scripts/probe-mt-latch.sh
+# or:
+cat /sys/bus/usb/devices/*:1.0/scenario
+echo 1 | sudo tee /sys/bus/usb/devices/*:1.0/mt_latch
+cat /sys/bus/usb/devices/*:1.0/mt_latch   # before after
+```
+
+Want GET=`3` and dmesg finger-bit / `display_cfg` with `0x00080000`. Then two fingers → hidraw report `0x0c`.
+
+Draw entry defaults to the same path (`mt_latch_on_draw=1`); skips `TOUCH_PEN`/`0x90` when armed.
+`eink-touchpad` prefers HID `0x0c` → ABS_MT uinput; `0x90` is fallback.
+
 ## Layout
 
 ```

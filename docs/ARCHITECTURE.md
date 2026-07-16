@@ -24,7 +24,8 @@ addresses, HID report formats, waveform names, and init sequences.
 
 When reference and hardware disagree, **hardware wins**. Validate on the YogaBook
 C930. Windows-proven coordinator notes live in
-[PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md).
+[PROTOCOL_WINDOWS.md](PROTOCOL_WINDOWS.md). The consolidated device/firmware map
+lives in [SYSTEM_SPEC.md](SYSTEM_SPEC.md).
 
 ---
 

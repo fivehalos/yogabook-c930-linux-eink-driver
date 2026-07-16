@@ -37,4 +37,7 @@ int hid_touch_read(struct eink_hid_touch *hid, uint8_t *buf, size_t buflen);
 /* Print all YogaBook hidraw nodes and how they were classified. */
 int hid_touch_list_candidates(void);
 
+/* True if hidraw advertises report 0x0c or Linux 0x03 MT in its descriptor. */
+int hid_touch_path_is_mt(const char *hidraw_path);
+
 #endif /* EINK_HID_TOUCH_H */

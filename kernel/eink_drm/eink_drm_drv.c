@@ -3,6 +3,7 @@
  * Lenovo YogaBook C930 E-Ink — DRM/USB driver (early bring-up).
  */
 
+#include <linux/device.h>
 #include <linux/module.h>
 #include <linux/usb.h>
 
@@ -11,6 +12,87 @@
 #include "protocol/ite8951.h"
 
 #define DRIVER_NAME	"eink_drm"
+
+static struct eink_drm_device *eink_drm_from_dev(struct device *dev)
+{
+	struct usb_interface *intf = to_usb_interface(dev);
+
+	return usb_get_intfdata(intf);
+}
+
+static ssize_t scenario_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct eink_drm_device *pdev = eink_drm_from_dev(dev);
+	u8 scenario = 0xff;
+	int ret;
+
+	if (!pdev)
+		return -ENODEV;
+
+	ret = ite8951_get_scenario(&pdev->usb_link, &scenario);
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "%u\n", scenario);
+}
+static DEVICE_ATTR_RO(scenario);
+
+/*
+ * Read: "before after" from last mt_latch write (or "- -" if never run).
+ * Write 1: cold mt-arm (E ops + finger bit); no TOUCH_PEN / 0x90.
+ */
+static ssize_t mt_latch_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct eink_drm_device *pdev = eink_drm_from_dev(dev);
+
+	if (!pdev)
+		return -ENODEV;
+
+	if (!pdev->usb_link.mt_latch_ran)
+		return sysfs_emit(buf, "- -\n");
+
+	return sysfs_emit(buf, "%u %u\n",
+			  pdev->usb_link.mt_latch_before,
+			  pdev->usb_link.mt_latch_after);
+}
+
+static ssize_t mt_latch_store(struct device *dev,
+			      struct device_attribute *attr,
+			      const char *buf, size_t count)
+{
+	struct eink_drm_device *pdev = eink_drm_from_dev(dev);
+	unsigned int enable;
+	int ret;
+
+	if (!pdev)
+		return -ENODEV;
+
+	ret = kstrtouint(buf, 0, &enable);
+	if (ret)
+		return ret;
+	if (enable != 1)
+		return -EINVAL;
+
+	ret = ite8951_mt_mode_replay(&pdev->usb_link);
+	/*
+	 * -EAGAIN means sequence ran but GET != 3 — still a useful probe
+	 * result; surface via read and dmesg, treat store as success.
+	 */
+	if (ret && ret != -EAGAIN)
+		return ret;
+
+	return count;
+}
+static DEVICE_ATTR_RW(mt_latch);
+
+static struct attribute *eink_drm_attrs[] = {
+	&dev_attr_scenario.attr,
+	&dev_attr_mt_latch.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(eink_drm);
 
 static const struct usb_device_id eink_drm_usb_ids[] = {
 	{ USB_DEVICE(EINK_USB_VENDOR_ID, EINK_USB_PRODUCT_ID) },
@@ -109,6 +191,16 @@ static int eink_drm_probe_vendor_interface(struct usb_interface *intf)
 		goto err_teardown;
 	}
 
+	ret = sysfs_create_groups(&intf->dev.kobj, eink_drm_groups);
+	if (ret) {
+		dev_err(&intf->dev, "sysfs groups failed: %d\n", ret);
+		eink_drm_kms_unregister(pdev);
+		goto err_teardown;
+	}
+
+	dev_info(&intf->dev,
+		 "MT probe: cat scenario; echo 1 > mt_latch; cat mt_latch\n");
+
 	return 0;
 
 err_teardown:
@@ -128,6 +220,7 @@ static void eink_drm_disconnect(struct usb_interface *intf)
 	if (!pdev)
 		return;
 
+	sysfs_remove_groups(&intf->dev.kobj, eink_drm_groups);
 	eink_drm_kms_unregister(pdev);
 	ite8951_usb_teardown(&pdev->usb_link);
 	mutex_destroy(&pdev->usb_link.io_lock);
