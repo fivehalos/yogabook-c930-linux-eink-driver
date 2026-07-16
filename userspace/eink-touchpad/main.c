@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 
 #include "evdev_grab.h"
 #include "gestures.h"
@@ -16,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <unistd.h>
 
 static volatile sig_atomic_t g_stop;
 
@@ -30,9 +32,9 @@ static void usage(const char *prog)
 	fprintf(stderr,
 		"Usage: %s [options]\n"
 		"\n"
-		"E-Ink touchpad: HID 0x90 single-contact + soft multi-finger (working).\n"
-		"HID 0x0c real multitouch is not streaming yet after cold GET=3;\n"
-		"use -H /dev/hidrawN when that path is proven live.\n"
+		"E-Ink touchpad: prefers HID 0x0c multitouch after kernel mt-arm;\n"
+		"falls back to 0x90 single-contact (+ soft multi-finger) if quiet.\n"
+		"Use -H /dev/hidrawN to force a node.\n"
 		"\n"
 		"Options:\n"
 		"  -d, --debug         Log touch coords and emitted events\n"
@@ -44,7 +46,7 @@ static void usage(const char *prog)
 		"      --warp-max N    Drop single-frame deltas > N display px (default: 40)\n"
 		"      --idle-ms N     Pointer rebase after N ms silence (default: 50)\n"
 		"      --release-ms N  End gesture / allow chord within N ms (default: 300)\n"
-		"  -g, --grab          Also HIDIOCREVOKE on hidraw (usually unnecessary)\n"
+		"  -g, --grab          HIDIOCREVOKE on hidraw (can kill node — try only if quiet)\n"
 		"      --no-evdev-grab  Allow kernel absolute touch (causes cursor jump)\n"
 		"  -l, --list-hid      Show YogaBook hidraw nodes and exit\n"
 		"  -h, --help          Show this help\n"
@@ -78,6 +80,7 @@ int main(int argc, char **argv)
 	bool grab_hid = false;
 	bool selftest = false;
 	bool grab_evdev = true;
+	bool mt_hid = false;
 	uint8_t buf[256];
 	int opt;
 
@@ -155,7 +158,13 @@ int main(int argc, char **argv)
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
 
+	if (hid_path)
+		mt_hid = hid_touch_path_is_mt(hid_path);
+	if (mt_hid)
+		grab_evdev = false;
+
 	int hid_err;
+	int hid_reopen;
 
 	hid_err = hid_touch_open(&hid, hid_path, grab_hid);
 	if (hid_err < 0) {
@@ -168,7 +177,17 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	fprintf(stderr, "touch HID: %s\n", hid.path);
+	if (!mt_hid)
+		mt_hid = hid_touch_path_is_mt(hid.path);
+
+	fprintf(stderr, "touch HID: %s%s\n", hid.path,
+		mt_hid ? " (MT digitizer)" : "");
+	if (grab_hid)
+		fprintf(stderr, "HIDIOCREVOKE enabled (-g)\n");
+	if (mt_hid)
+		fprintf(stderr, "MT path: skipping evdev grab (hidraw is source)\n");
+	else if (!grab_hid)
+		fprintf(stderr, "hint: if hidraw stays quiet, retry with -g\n");
 
 	if (grab_evdev && !dry_run) {
 		int gerr = evdev_grab_hidraw_siblings(hid.path);
@@ -190,6 +209,21 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		fprintf(stderr, "uinput devices created (pointer + gesture keyboard)\n");
+		if (mt_hid) {
+			int mterr = uinput_open_mt(&out);
+
+			if (mterr < 0) {
+				fprintf(stderr,
+					"ABS_MT uinput open failed: %s\n",
+					strerror(-mterr));
+				uinput_close(&out);
+				hid_touch_close(&hid);
+				return 1;
+			}
+			fprintf(stderr,
+				"MT touchpad uinput ready (not Pointer event26)\n");
+			uinput_hint_device("YogaBook E-Ink Touchpad");
+		}
 		if (selftest) {
 			int st = uinput_selftest_pointer(&out);
 
@@ -204,13 +238,21 @@ int main(int argc, char **argv)
 	}
 
 	gesture_state_init(&gesture, &gcfg);
+	if (mt_hid) {
+		fprintf(stderr,
+			"touchpad active — HID 0x0c/0x03 ABS_MT (touch E-Ink now)\n");
+	} else {
+		fprintf(stderr,
+			"touchpad active — HID 0x90 REL + soft chords "
+			"(0x0c ABS_MT when that iface streams)\n");
+	}
 	fprintf(stderr,
-		"touchpad active — HID 0x90 REL + soft chords "
-		"(0x0c ABS_MT when that iface streams)\n"
 		"  taps: 1=left  2=right  3=middle  "
 		"(rotate=%d warp-max=%d idle=%d release=%d)\n",
 		gcfg.rotate_deg, gcfg.pointer_max_step_px, gcfg.pointer_idle_ms,
 		gcfg.release_idle_ms);
+
+	hid_reopen = 0;
 
 	while (!g_stop) {
 		struct eink_touch_frame frame;
@@ -219,10 +261,27 @@ int main(int argc, char **argv)
 		bool use_mt;
 
 		n = hid_touch_read(&hid, buf, sizeof(buf));
-		evdev_grab_poll();
+		if (!dry_run)
+			evdev_grab_poll();
 		if (n < 0) {
 			if (n == -EINTR)
 				continue;
+			if (n == -ENODEV && hid_reopen < 5) {
+				fprintf(stderr,
+					"hidraw reset — reopening %s...\n",
+					hid.path);
+				hid_touch_close(&hid);
+				usleep(300 * 1000);
+				hid_err = hid_touch_open(&hid, hid.path, grab_hid);
+				if (hid_err < 0) {
+					fprintf(stderr,
+						"hid reopen failed: %s\n",
+						strerror(-hid_err));
+					break;
+				}
+				hid_reopen++;
+				continue;
+			}
 			fprintf(stderr, "hid read error: %s\n", strerror(-n));
 			break;
 		}
@@ -247,9 +306,9 @@ int main(int argc, char **argv)
 		use_mt = frame.kind == EINK_TOUCH_KIND_MT;
 
 		if (debug) {
-			fprintf(stderr, "kind=%s contacts=%d\n",
+			fprintf(stderr, "kind=%s contacts=%d (id=0x%02x)\n",
 				use_mt ? "0x0c-MT" : "0x90",
-				frame.contact_count);
+				frame.contact_count, buf[0]);
 			for (i = 0; i < frame.contact_count; i++) {
 				const struct eink_touch_contact *c =
 					&frame.contacts[i];
@@ -275,7 +334,8 @@ int main(int argc, char **argv)
 						break;
 					}
 					fprintf(stderr,
-						"MT mode: ABS_MT uinput (libinput gestures)\n");
+						"MT touchpad uinput ready\n");
+					uinput_hint_device("YogaBook E-Ink Touchpad");
 				}
 				gret = uinput_emit_mt_frame(&out, &frame);
 			} else {

@@ -144,9 +144,9 @@ Opcode table for the leave half is in §6; finger-enable is in §1 (validated).
 ### Now
 
 1. Keep DRM working.
-2. Gate `reapply_draw_input` / `TOUCH_PEN` when experimenting with MT.
-3. Implement / finish **`0x0c` → uinput** path (parser exists; auto-hid pick still prefers `0x90`).
-4. Port **`mt-arm`** to Linux; keep §4 fallback only if port fails on-device.
+2. Gate `reapply_draw_input` / `TOUCH_PEN` when GET=`3` + finger bit (done in `ite8951_mt_mode_replay`).
+3. Prefer **`0x0c` → uinput** in `eink-touchpad` auto-hid (fallback `0x90`).
+4. **Ported:** Linux `mt_latch` / `mt_latch_on_draw` runs cold **`mt-arm`** (E ops 1–20 + `display_cfg |= 0x00080000`). On-device: confirm HID `0x0c` ≥2 contacts; keep §4 fallback only if that fails.
 
 ### When dual-booting Windows again
 
@@ -235,7 +235,7 @@ Fallback / Homebar-armed:
 | `win-captures/E-*` | Mode + HID evidence |
 | `win-captures/S-einksvr-restart.pcap` | Enable/init to clone for fallback |
 | `scripts/windows/eink-winusb/` | `mt-arm`, `mt-enter`, `finger-enable`, `fill`, `stripes` |
-| `kernel/.../ite8951_usb.c` | Today’s leave + TOUCH_PEN |
+| `kernel/.../ite8951_usb.c` | Cold `mt-arm` via `ite8951_mt_mode_replay` / sysfs `mt_latch`; TOUCH_PEN only as fallback |
 | `userspace/eink-touchpad/` | `0x0c` parse + uinput |
 
 ---

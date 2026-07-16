@@ -121,6 +121,15 @@ static void log_sysname(int fd, const char *label, const char *pretty_name)
 		fprintf(stderr, "%s: event node not found in /proc yet\n", label);
 }
 
+void uinput_hint_device(const char *pretty_name)
+{
+	int event_num = find_event_num(pretty_name);
+
+	if (event_num >= 0)
+		fprintf(stderr, "  libinput: --device /dev/input/event%d (%s)\n",
+			event_num, pretty_name);
+}
+
 /*
  * niri/libinput open event nodes as the seated user. Devices created via
  * sudo often stay root:root 0600 until udev uaccess runs — too late or never

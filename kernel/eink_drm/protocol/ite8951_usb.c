@@ -731,6 +731,15 @@ module_param(reassert_draw_input, bool, 0644);
 MODULE_PARM_DESC(reassert_draw_input,
 		 "Re-send 0xAC/0xB3/0xAF every frame (can stop HID 0x90 — leave off)");
 
+/*
+ * Cold mt-arm on draw: E ops 1–20 (GET=3) + finger-enable (display_cfg bit).
+ * Skip TOUCH_PEN 0x90 when that succeeds — HID 0x0c needs the finger bit.
+ */
+static bool mt_latch_on_draw = true;
+module_param(mt_latch_on_draw, bool, 0644);
+MODULE_PARM_DESC(mt_latch_on_draw,
+		 "On draw entry run cold mt-arm (mt-enter + finger bit); skip 0x90 if GET==3 (default on)");
+
 static int ite8951_set_handwriting_region(struct ite8951_usb *link,
 					  u16 x, u16 y, u16 w, u16 h)
 {
@@ -902,9 +911,20 @@ static int ite8951_detach_keyboard_input(struct ite8951_usb *link)
 
 int ite8951_reapply_draw_input(struct ite8951_usb *link)
 {
+	u8 reported = 0xff;
+
 	if (!link || !link->draw_mode_active || !reassert_draw_input)
 		return 0;
-	if (keep_firmware_keyboard_input || !touch_userspace_config)
+	if (keep_firmware_keyboard_input)
+		return 0;
+
+	/* Do not reassert 0x90 over a live mt-arm (GET=3 + finger bit). */
+	if (mt_latch_on_draw && link->mt_finger_armed &&
+	    !ite8951_get_scenario(link, &reported) &&
+	    reported == ITE8951_SCENARIO_PEN_MOUSE)
+		return 0;
+
+	if (!touch_userspace_config)
 		return 0;
 
 	return ite8951_detach_keyboard_input(link);
@@ -940,7 +960,20 @@ static int ite8951_scenario_cmd(struct ite8951_usb *link, u32 address, u16 arg1,
 
 static int ite8951_get_tcon_scenario(struct ite8951_usb *link, u8 *scenario)
 {
-	return ite8951_scenario_cmd(link, 0, 0, scenario);
+	int ret;
+
+	ret = ite8951_scenario_cmd(link, 0, 0, scenario);
+	if (!ret && scenario)
+		link->last_scenario = *scenario;
+	return ret;
+}
+
+int ite8951_get_scenario(struct ite8951_usb *link, u8 *scenario)
+{
+	if (!link || !scenario)
+		return -EINVAL;
+
+	return ite8951_get_tcon_scenario(link, scenario);
 }
 
 /*
@@ -1006,6 +1039,372 @@ static int ite8951_dynamic_cdb_pen_mouse(struct ite8951_usb *link)
 				  0x0100, 0x0103, 0x0301, 0);
 
 	return ite8951_exchange(link, &packet, NULL, 0);
+}
+
+/*
+ * E / EinkWinUsb MT path: CDB-inline 0xB3 with short IN (6 bytes), not
+ * the payload bool struct used by detach_keyboard.
+ */
+static int ite8951_dynamic_cdb_args(struct ite8951_usb *link,
+				    u16 arg1, u16 arg2, u16 arg3)
+{
+	struct ite8951_ctrl_packet packet;
+	u8 response[6];
+	int ret;
+
+	ite8951_build_ctrl_packet(&packet, true, sizeof(response),
+				  ITE8951_USB_OP_DYNAMICSETTING, 0,
+				  arg1, arg2, arg3, 0);
+
+	ret = ite8951_exchange(link, &packet, response, sizeof(response));
+	if (ret)
+		return ret;
+
+	dev_dbg(&link->usb_dev->dev, "B3 CDB %04x/%04x/%04x rsp %*ph\n",
+		arg1, arg2, arg3, (int)sizeof(response), response);
+	return 0;
+}
+
+/* E ops: 0x81 READ_MEM @0x80 len 16 (best-effort; warn and continue). */
+static int ite8951_read_mem_mt_probe(struct ite8951_usb *link)
+{
+	struct ite8951_ctrl_packet packet;
+	u8 response[16];
+	int ret;
+
+	ite8951_build_ctrl_packet(&packet, true, sizeof(response),
+				  ITE8951_USB_OP_READ_MEM, 0x00000080u,
+				  0x0010, 0, 0, 0);
+
+	ret = ite8951_exchange(link, &packet, response, sizeof(response));
+	if (ret)
+		return ret;
+
+	dev_dbg(&link->usb_dev->dev, "READ_MEM @0x80: %*ph\n",
+		(int)sizeof(response), response);
+	return 0;
+}
+
+/* E ops 5–7 / 17–19: read panel + display_cfg, write display_cfg back. */
+static int ite8951_echo_display_cfg(struct ite8951_usb *link)
+{
+	u32 panel_mode, display_cfg;
+	int ret;
+
+	ret = ite8951_read_reg_u32(link, ITE8951_REG_PANEL_MODE, &panel_mode);
+	if (ret)
+		dev_dbg(&link->usb_dev->dev,
+			"MT: panel_mode read failed: %d\n", ret);
+
+	ret = ite8951_read_reg_u32(link, ITE8951_REG_DISPLAY_CFG, &display_cfg);
+	if (ret)
+		return ret;
+
+	return ite8951_write_reg_u32(link, ITE8951_REG_DISPLAY_CFG, display_cfg);
+}
+
+/*
+ * Windows mt-enter AC: expect short IN (8), no OUT payload — not the
+ * le16 region OUT used by detach_keyboard.
+ */
+static int ite8951_mt_ac_clear(struct ite8951_usb *link)
+{
+	struct ite8951_ctrl_packet packet;
+	u8 response[8];
+
+	ite8951_build_ctrl_packet(&packet, true, sizeof(response),
+				  ITE8951_USB_OP_SET_HANDWR_REGION, 0,
+				  0, 0, 0, 0);
+
+	return ite8951_exchange(link, &packet, response, sizeof(response));
+}
+
+static u32 ite8951_draw_display_cfg_value(const struct ite8951_usb *link)
+{
+	u32 value = ITE8951_DISPLAY_CFG_DRAW;
+
+	if (link && link->mt_finger_armed)
+		value |= ITE8951_DISPLAY_CFG_FINGER_BIT;
+
+	return value & ~ITE8951_DISPLAY_CFG_MISTAKE_BIT;
+}
+
+static int ite8951_scenario_set_mt_latch(struct ite8951_usb *link)
+{
+	u8 response[4];
+	struct ite8951_ctrl_packet packet;
+	int ret;
+
+	ite8951_build_ctrl_packet(&packet, true, sizeof(response),
+				  ITE8951_USB_OP_SCENARIO,
+				  ITE8951_SCENARIO_MT_LATCH_ADDR,
+				  0, 0, 0, 0);
+
+	ret = ite8951_exchange(link, &packet, response, sizeof(response));
+	if (ret) {
+		dev_err(&link->usb_dev->dev,
+			"SCENARIO MT latch addr=0x%08x failed: %d\n",
+			ITE8951_SCENARIO_MT_LATCH_ADDR, ret);
+		return ret;
+	}
+
+	dev_info(&link->usb_dev->dev,
+		 "SCENARIO MT latch addr=0x%08x rsp %*ph\n",
+		 ITE8951_SCENARIO_MT_LATCH_ADDR, (int)sizeof(response),
+		 response);
+	return 0;
+}
+
+/* E-capture opcode 0xAE (arg1=0x0100, 1-byte IN). Semantics still open. */
+static int ite8951_mt_ae_enable(struct ite8951_usb *link)
+{
+	struct ite8951_ctrl_packet packet;
+	u8 response;
+	int ret;
+
+	ite8951_build_ctrl_packet(&packet, true, 1, ITE8951_USB_OP_AE, 0,
+				  0x0100, 0, 0, 0);
+
+	ret = ite8951_exchange(link, &packet, &response, sizeof(response));
+	if (ret)
+		dev_warn(&link->usb_dev->dev, "MT path 0xAE failed: %d\n", ret);
+	else
+		dev_dbg(&link->usb_dev->dev, "MT path 0xAE rsp=0x%02x\n",
+			response);
+
+	return ret;
+}
+
+/*
+ * Finger-enable (EinkWinUsb finger-enable / E capture after GET=3):
+ *   0x81 READ_MEM @0x80
+ *   0xB3 CDB 0100/0003/0301
+ *   display_cfg |= 0x00080000 (clear mistaken 0x00000800)
+ * Required for live HID 0x0c; GET=3 alone is pen-only.
+ */
+static int ite8951_finger_enable(struct ite8951_usb *link)
+{
+	u32 before, after, verify;
+	int ret;
+
+	ret = ite8951_read_mem_mt_probe(link);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: READ_MEM (finger) failed: %d\n", ret);
+
+	ret = ite8951_dynamic_cdb_args(link, 0x0100, 0x0003, 0x0301);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: B3 finger failed: %d\n", ret);
+
+	ret = ite8951_read_reg_u32(link, ITE8951_REG_DISPLAY_CFG, &before);
+	if (ret) {
+		dev_err(&link->usb_dev->dev,
+			"MT arm: read display_cfg failed: %d\n", ret);
+		return ret;
+	}
+
+	/*
+	 * Finger bit is 0x00080000. Note Linux draw latch 0x002e0000 already
+	 * includes that bit (0x2e = 0x20|0x08|…); Windows cold often starts
+	 * from 0x00200000 and becomes 0x00280000.
+	 */
+	after = (before | ITE8951_DISPLAY_CFG_FINGER_BIT) &
+		~ITE8951_DISPLAY_CFG_MISTAKE_BIT;
+
+	if (before & ITE8951_DISPLAY_CFG_FINGER_BIT) {
+		dev_info(&link->usb_dev->dev,
+			 "MT arm: display_cfg 0x%08x already has finger bit 0x%08x\n",
+			 before, ITE8951_DISPLAY_CFG_FINGER_BIT);
+		link->mt_finger_armed = true;
+		return 0;
+	}
+
+	ret = ite8951_write_reg_u32(link, ITE8951_REG_DISPLAY_CFG, after);
+	if (ret) {
+		dev_err(&link->usb_dev->dev,
+			"MT arm: write display_cfg failed: %d\n", ret);
+		return ret;
+	}
+
+	ret = ite8951_read_reg_u32(link, ITE8951_REG_DISPLAY_CFG, &verify);
+	if (!ret)
+		dev_info(&link->usb_dev->dev,
+			 "MT arm: display_cfg 0x%08x -> 0x%08x (verify 0x%08x)\n",
+			 before, after, verify);
+	else
+		dev_info(&link->usb_dev->dev,
+			 "MT arm: display_cfg 0x%08x -> 0x%08x\n", before, after);
+
+	link->mt_finger_armed = true;
+	return 0;
+}
+
+/*
+ * Cold mt-arm = EinkWinUsb mt-enter (E ops 1–20) + finger-enable.
+ * Does NOT call detach_keyboard / TOUCH_PEN (that collapses to HID 0x90).
+ * Success: GET byte1 == 3 and display_cfg finger bit set → expect HID 0x0c.
+ */
+int ite8951_mt_mode_replay(struct ite8951_usb *link)
+{
+	u8 before = 0xff;
+	u8 after = 0xff;
+	u32 display_cfg = 0;
+	int ret;
+
+	if (!link || !link->usb_dev)
+		return -EINVAL;
+
+	ret = ite8951_get_tcon_scenario(link, &before);
+	if (ret)
+		return ret;
+
+	/* Idempotent: already armed — do not race a second full sequence. */
+	if (before == ITE8951_SCENARIO_PEN_MOUSE &&
+	    !ite8951_read_reg_u32(link, ITE8951_REG_DISPLAY_CFG, &display_cfg) &&
+	    (display_cfg & ITE8951_DISPLAY_CFG_FINGER_BIT)) {
+		link->mt_latch_before = before;
+		link->mt_latch_after = before;
+		link->mt_latch_ran = true;
+		link->mt_finger_armed = true;
+		dev_info(&link->usb_dev->dev,
+			 "MT arm: already GET=3 + finger (cfg=0x%08x) — skip\n",
+			 display_cfg);
+		return 0;
+	}
+
+	link->mt_latch_before = before;
+	link->mt_finger_armed = false;
+	dev_info(&link->usb_dev->dev,
+		 "MT arm: GET before=%u — cold mt-enter (E ops 1–20)\n",
+		 before);
+
+	/* op1 */
+	ret = ite8951_read_mem_mt_probe(link);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: READ_MEM op1 failed: %d\n", ret);
+
+	/* ops 2–4 */
+	ret = ite8951_dynamic_cdb_args(link, 0x0101, 0x0003, 0x0301);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: B3 0101/0003/0301 failed: %d\n", ret);
+
+	ret = ite8951_set_waveform_u16(link, 0x200);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: waveform 0x200 failed: %d\n", ret);
+
+	ret = ite8951_scenario_set_mt_latch(link);
+	if (ret)
+		goto out_log;
+
+	/* ops 5–7 */
+	ret = ite8951_echo_display_cfg(link);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: echo display_cfg failed: %d\n", ret);
+
+	/* ops 8–9 */
+	ret = ite8951_mt_ae_enable(link);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: continuing after 0xAE failure\n");
+
+	ret = ite8951_mt_ac_clear(link);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: AC clear failed: %d\n", ret);
+
+	/* op10 */
+	ret = ite8951_read_mem_mt_probe(link);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: READ_MEM op10 failed: %d\n", ret);
+
+	/* ops 11–13 */
+	ret = ite8951_dynamic_cdb_args(link, 0x0100, 0x0003, 0x0301);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: B3 0100/0003/0301 failed: %d\n", ret);
+
+	ret = ite8951_set_waveform_u16(link, 0x200);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: waveform 0x200 (pass 2) failed: %d\n", ret);
+
+	ret = ite8951_scenario_set_mt_latch(link);
+	if (ret)
+		goto out_log;
+
+	/* ops 14–15 */
+	ret = ite8951_read_mem_mt_probe(link);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: READ_MEM op14 failed: %d\n", ret);
+
+	ret = ite8951_dynamic_cdb_args(link, 0x0100, 0x0003, 0x0201);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: B3 0100/0003/0201 failed: %d\n", ret);
+
+	/* op16 */
+	ret = ite8951_doorknock(link);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: GET_SYS failed: %d\n", ret);
+
+	/* ops 17–19 */
+	ret = ite8951_echo_display_cfg(link);
+	if (ret)
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: echo display_cfg (2) failed: %d\n", ret);
+
+	/* op20 */
+	ret = ite8951_get_tcon_scenario(link, &after);
+	if (ret)
+		goto out_log;
+
+	link->mt_latch_after = after;
+	link->mt_latch_ran = true;
+	dev_info(&link->usb_dev->dev,
+		 "MT arm: after mt-enter GET=%u (want %u)%s\n",
+		 after, ITE8951_SCENARIO_PEN_MOUSE,
+		 after == ITE8951_SCENARIO_PEN_MOUSE ? " — OK" :
+		 after == ITE8951_SCENARIO_KEYBOARD ? " — still keyboard" :
+		 " — bare leave class?");
+
+	if (after != ITE8951_SCENARIO_PEN_MOUSE)
+		return -EAGAIN;
+
+	ret = ite8951_finger_enable(link);
+	if (ret) {
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm: finger-enable failed: %d "
+			 "(GET=3 but 0x0c may stay quiet)\n", ret);
+		return ret;
+	}
+
+	ret = ite8951_get_tcon_scenario(link, &after);
+	if (!ret) {
+		link->mt_latch_after = after;
+		dev_info(&link->usb_dev->dev,
+			 "MT arm: complete GET=%u finger=%u — expect HID 0x0c\n",
+			 after, link->mt_finger_armed);
+	}
+
+	return 0;
+
+out_log:
+	if (!ite8951_get_tcon_scenario(link, &after)) {
+		link->mt_latch_after = after;
+		link->mt_latch_ran = true;
+		dev_info(&link->usb_dev->dev,
+			 "MT arm: aborted, GET now=%u (before=%u)\n",
+			 after, before);
+	}
+	return ret;
 }
 
 /* Prefer address = scenario << 24; return 0 if GET left firmware keyboard. */
@@ -1204,7 +1603,8 @@ static int ite8951_latch_display_draw(struct ite8951_usb *link,
 		return ret;
 	}
 
-	ret = ite8951_write_reg_u32(link, ITE8951_REG_DISPLAY_CFG, 0x002e0000);
+	ret = ite8951_write_reg_u32(link, ITE8951_REG_DISPLAY_CFG,
+				    ite8951_draw_display_cfg_value(link));
 	if (ret) {
 		dev_err(&link->usb_dev->dev,
 			"draw mode: write display cfg failed: %d\n", ret);
@@ -1221,12 +1621,33 @@ static int ite8951_latch_display_draw(struct ite8951_usb *link,
 
 static int ite8951_apply_draw_input(struct ite8951_usb *link)
 {
+	u8 reported = 0xff;
 	int ret;
 
 	if (keep_firmware_keyboard_input) {
 		dev_info(&link->usb_dev->dev,
 			 "firmware keyboard input left active (keep_firmware_keyboard_input=1)\n");
 		return 0;
+	}
+
+	if (mt_latch_on_draw) {
+		ret = ite8951_mt_mode_replay(link);
+		if (ret && ret != -EAGAIN)
+			dev_warn(&link->usb_dev->dev,
+				 "MT arm on draw failed: %d — falling back\n",
+				 ret);
+
+		ret = ite8951_get_tcon_scenario(link, &reported);
+		if (!ret && reported == ITE8951_SCENARIO_PEN_MOUSE &&
+		    link->mt_finger_armed) {
+			dev_info(&link->usb_dev->dev,
+				 "MT arm held (GET=3 + finger) — skipping TOUCH_PEN 0x90\n");
+			return 0;
+		}
+
+		dev_warn(&link->usb_dev->dev,
+			 "MT arm incomplete (GET=%u finger=%u) — using 0x90 route\n",
+			 reported, link->mt_finger_armed);
 	}
 
 	if (!touch_userspace_config) {
@@ -1304,22 +1725,34 @@ static int ite8951_enter_draw_mode_coordinator(struct ite8951_usb *link)
 	dev_info(&link->usb_dev->dev,
 		 "entering draw mode (input_scenario=%u)\n", input_scenario);
 
-	ret = ite8951_request_input_scenario(link);
-	if (ret)
-		return ret;
+	/*
+	 * Bare leave (A6 0x03000000 → GET=0) fights cold mt-arm (GET=3).
+	 * When mt_latch_on_draw, only latch display_cfg here; mt-arm runs in
+	 * apply_draw_input afterward.
+	 */
+	if (!mt_latch_on_draw) {
+		ret = ite8951_request_input_scenario(link);
+		if (ret)
+			return ret;
+	} else {
+		dev_info(&link->usb_dev->dev,
+			 "draw: skip bare leave-KB (mt-arm owns scenario)\n");
+	}
 
 	ret = ite8951_latch_display_draw(link, &panel_mode, &display_cfg);
 	if (ret)
 		return ret;
 
-	reported = ite8951_log_tcon_scenario(link, "after display_cfg");
-	if (reported >= 0 &&
-	    !ite8951_scenario_satisfied(input_scenario, reported)) {
-		dev_warn(&link->usb_dev->dev,
-			 "still keyboard (GET=%u) after display_cfg, retrying leave-KB (want=%u)\n",
-			 reported, input_scenario);
-		ite8951_try_set_coordinator_scenario(link, input_scenario);
-		ite8951_log_tcon_scenario(link, "after post-display retry");
+	if (!mt_latch_on_draw) {
+		reported = ite8951_log_tcon_scenario(link, "after display_cfg");
+		if (reported >= 0 &&
+		    !ite8951_scenario_satisfied(input_scenario, reported)) {
+			dev_warn(&link->usb_dev->dev,
+				 "still keyboard (GET=%u) after display_cfg, retrying leave-KB (want=%u)\n",
+				 reported, input_scenario);
+			ite8951_try_set_coordinator_scenario(link, input_scenario);
+			ite8951_log_tcon_scenario(link, "after post-display retry");
+		}
 	}
 
 	dev_info(&link->usb_dev->dev,
@@ -1386,7 +1819,8 @@ int ite8951_assert_draw_scenario(struct ite8951_usb *link)
 			return ret;
 	}
 
-	ret = ite8951_write_reg_u32(link, ITE8951_REG_DISPLAY_CFG, 0x002e0000);
+	ret = ite8951_write_reg_u32(link, ITE8951_REG_DISPLAY_CFG,
+				    ite8951_draw_display_cfg_value(link));
 	if (ret)
 		return ret;
 

@@ -28,4 +28,7 @@ int uinput_emit_mt_frame(struct eink_uinput *out,
 			 const struct eink_touch_frame *frame);
 int uinput_selftest_pointer(struct eink_uinput *out);
 
+/* Print /dev/input/eventN for a created uinput node (if found). */
+void uinput_hint_device(const char *pretty_name);
+
 #endif /* EINK_UINPUT_OUT_H */
